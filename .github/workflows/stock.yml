@@ -1,4 +1,4 @@
-name: 股票深度分析钉钉推送
+name: 双引擎股票深度分析钉钉推送
 on:
   # 手动输入股票代码触发（你日常用的模式）
   workflow_dispatch:
@@ -20,18 +20,18 @@ jobs:
         with:
           python-version: "3.11"
 
-      - name: 安装所有依赖库（自动安装，不用你管）
+      - name: 自动安装所有依赖库
         run: |
           pip install tavily-python
           pip install openai
 
-      - name: 运行股票深度分析（自动加载你配置的3个密钥）
+      - name: 运行双引擎深度分析（自动加载你配置的密钥）
         env:
           DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
           TAVILY_API_KEY: ${{ secrets.TAVILY_API_KEY }}
         run: python stock_analysis.py ${{ inputs.stock_code }}
 
-      - name: 推送分析报告到钉钉（完全复用你已有的钉钉配置）
+      - name: 推送分析报告到钉钉（完全复用你已有的配置）
         env:
           DINGTALK_WEBHOOK: ${{ secrets.DINGTALK_WEBHOOK }}
           DINGTALK_SECRET: ${{ secrets.DINGTALK_SECRET }}
@@ -41,15 +41,15 @@ jobs:
           # 钉钉签名生成（和你之前能用的逻辑完全一致，不会报错）
           timestamp=$(date +%s%3N)
           sign_string=$(printf "%s\n%s" "$timestamp" "$DINGTALK_SECRET")
-          sign=$(echo -n "$sign_string" | openssl dgst -sha256 -hmac "$DINGTALK_SECRET" -binary | base64 | tr -d '\n' | sed 's/+/%2B/g; s/\//%2F/g; s/=/%3D/g')
+          sign=$(echo -n "$sign_string" | openssl dgst -sha256 -hmac "$DINGTALK_SECRET" -binary | base64 | tr -d '\n' | sed 's/+/%2B/g' | sed 's/\//%2F/g' | sed 's/=/%3D/g')
           final_url="${DINGTALK_WEBHOOK}&timestamp=${timestamp}&sign=${sign}"
 
-          # 推送到钉钉群
+          # 推送到钉钉群，解决长文本推送问题
           curl -X POST "$final_url" \
             -H "Content-Type: application/json" \
-            -d '{
-              "msgtype": "text",
-              "text": {
-                "content": "'"$report_content"'"
+            -d "{
+              \"msgtype\": \"text\",
+              \"text\": {
+                \"content\": \"$report_content\"
               }
-            }'
+            }"
