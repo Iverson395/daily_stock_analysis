@@ -2,75 +2,123 @@ from openai import OpenAI
 from tavily import TavilyClient
 import sys
 import os
+import time
 
 # --------------------------  完全复用你已有的配置，不用改任何内容  --------------------------
-# 初始化DeepSeek（用官方推荐的OpenAI兼容模式，最稳定）
-client = OpenAI(
+# 初始化DeepSeek（官方稳定模式，不会报模型404）
+deepseek_client = OpenAI(
     api_key=os.getenv("DEEPSEEK_API_KEY"),
     base_url="https://api.deepseek.com"
 )
-# 初始化你已经配置好的Tavily，不用改任何东西
-tavily = TavilyClient(api_key=os.getenv("TAVILY_API_KEY"))
+# 初始化Tavily（精准信息抓取）
+tavily_client = TavilyClient(api_key=os.getenv("TAVILY_API_KEY"))
 # 接收你输入的股票代码
 stock_code = sys.argv[1]
 # ---------------------------------------------------------------------------------------------
 
+# --------------------------  工具函数：带重试的信息抓取，提升稳定性  --------------------------
+def tavily_search_with_retry(query, max_retry=3, **kwargs):
+    """带重试的Tavily搜索，避免临时网络波动报错"""
+    for retry in range(max_retry):
+        try:
+            return tavily_client.search(query=query, **kwargs)
+        except Exception as e:
+            print(f"Tavily搜索第{retry+1}次失败：{str(e)}")
+            time.sleep(2)
+    raise Exception(f"Tavily搜索多次失败，请检查网络和API密钥")
+# ---------------------------------------------------------------------------------------------
+
 try:
-    # --------------------------  第一步：用Tavily获取全维度股票信息  --------------------------
-    print(f"正在获取{stock_code}的行情、新闻、资金信息...")
-    search_result = tavily.search(
-        query=f"A股{stock_code} 今日最新实时行情 股价 涨跌幅 开盘价 最高价 最低价 成交量 成交额 最新公告 龙虎榜 北向资金 行业新闻 2025年",
+    # --------------------------  第一步：Tavily分模块精准抓取全维度权威数据  --------------------------
+    print(f"【1/3】正在抓取{stock_code}全维度权威数据...")
+    # 1. 核心行情+技术面数据
+    market_search = tavily_search_with_retry(
+        query=f"A股{stock_code} 今日最新实时行情 股价 涨跌幅 开盘价 最高价 最低价 成交量 成交额 均线 MACD KDJ 支撑位 压力位 换手率",
         search_depth="advanced",
-        max_results=6,
-        include_answer=True,
-        include_raw_content=False
+        max_results=3,
+        include_domains=["sse.com.cn", "szse.cn", "eastmoney.com", "10jqka.com.cn"],
+        include_answer=True
     )
+    market_data = market_search.get("answer", "")
 
-    # 整理搜索到的全部信息
-    search_answer = search_result.get("answer", "")
-    search_details = ""
-    for idx, item in enumerate(search_result.get("results", [])):
-        search_details += f"\n{idx+1}. {item['title']}：{item['content'][:180]}"
-    full_info = f"【核心行情摘要】{search_answer}\n【详细信息补充】{search_details}"
+    # 2. 基本面+行业数据
+    basic_search = tavily_search_with_retry(
+        query=f"A股{stock_code} 最新业绩报告 主营业务 行业地位 动态市盈率 市净率 行业排名 核心竞争力 最新公告",
+        search_depth="advanced",
+        max_results=3,
+        include_domains=["sse.com.cn", "szse.cn", "cninfo.com.cn", "stcn.com"],
+        include_answer=True
+    )
+    basic_data = basic_search.get("answer", "")
 
+    # 3. 资金面+消息面数据
+    fund_news_search = tavily_search_with_retry(
+        query=f"A股{stock_code} 北向资金动向 龙虎榜数据 融资融券 最新行业政策 市场新闻 机构评级 券商研报观点",
+        search_depth="advanced",
+        max_results=4,
+        include_domains=["eastmoney.com", "10jqka.com.cn", "cnstock.com", "stcn.com"],
+        include_answer=True
+    )
+    fund_news_data = fund_news_search.get("answer", "")
+
+    # 4. 整合所有抓取到的原始数据，喂给DeepSeek
+    full_raw_data = f"""
+【一、核心行情与技术面数据】
+{market_data}
+
+【二、基本面与行业数据】
+{basic_data}
+
+【三、资金面与消息面数据】
+{fund_news_data}
+    """
+    print(f"【2/3】数据抓取完成，正在生成深度分析报告...")
     # ---------------------------------------------------------------------------------------------
 
-    # --------------------------  第二步：用DeepSeek生成专业深度分析  --------------------------
-    print("正在生成深度分析报告...")
-    # 给AI的提示词，贴合A股分析，输出规范、适合散户阅读
+    # --------------------------  第二步：DeepSeek基于真实数据做全维度深度分析  --------------------------
+    # 精准提示词，强制DeepSeek只基于提供的数据分析，杜绝瞎编，同时保证深度和结构
     prompt = f"""
-你是一名拥有10年经验的A股专业投资顾问，基于下面的股票全维度信息，生成一份450字以内的专业深度分析报告，严格遵守以下要求：
-1.  开头必须明确：股票名称、股票代码、今日最新股价、今日涨跌幅
-2.  分4个清晰模块：盘面解读、消息面影响、资金面动向、操作建议，每个模块用小标题区分
-3.  每个模块都要结合搜索到的具体信息，不要泛泛而谈，不要说空话
-4.  操作建议必须保守稳健，分持仓和空仓两种情况给出，绝对不能给激进的买卖建议
-5.  结尾必须加通用的股市风险提示
-6.  语言口语化，通俗易懂，适合普通散户投资者，不要用晦涩的专业术语
+你是拥有15年A股实战经验的资深投资顾问，现在必须**完全基于我提供的真实股票数据**，生成一份1200字左右的专业深度投资分析报告，严格遵守以下所有要求：
+1.  报告必须分7个固定模块，每个模块用【】标注小标题，结构清晰，每个模块必须有具体数据支撑，绝对不能泛泛而谈，绝对不能编造数据
+2.  【核心行情复盘】：明确股票名称、代码、今日核心行情表现，对比大盘和所属板块的强弱，分析今日量价配合情况
+3.  【技术面深度解读】：结合均线、MACD、KDJ、换手率等指标，分析当前趋势、关键支撑位与压力位，判断短期走势概率
+4.  基本面核心拆解】：分析公司主营业务核心亮点、最新业绩表现、行业内的竞争地位、估值水平在行业内的合理性
+5.  【资金与消息面解读】：解读北向资金、机构资金的动向，最新公告、行业政策、市场新闻对股价的影响，券商研报的核心观点
+6.  【机会与风险深度分析】：明确列出3个核心上涨驱动机会，3个核心下跌风险，必须结合这只股票的具体情况，不能说通用空话
+7.  【分场景实战操作策略】：分别给持仓者、空仓者制定保守稳健的具体操作计划，明确仓位建议、止盈止损的具体参考位置
+8.  结尾必须加通用的股市风险提示，语言通俗易懂，适合普通散户投资者，不要用过于晦涩的专业术语
+9.  所有分析必须完全基于我提供的真实数据，绝对不能编造任何不存在的信息
 
-股票全维度信息：
-{full_info}
+我提供的股票真实数据：
+{full_raw_data}
     """
 
-    # 调用DeepSeek生成分析报告，用官方稳定模型，不会报错
-    response = client.chat.completions.create(
-        model="deepseek-chat",
-        messages=[
-            {"role": "system", "content": "你是专业的A股投资顾问，擅长保守稳健的投资分析"},
-            {"role": "user", "content": prompt}
-        ],
-        temperature=0.3,
-        max_tokens=1000,
-        stream=False
-    )
+    # 调用DeepSeek生成报告，加容错，避免临时报错
+    try:
+        response = deepseek_client.chat.completions.create(
+            model="deepseek-chat",
+            messages=[
+                {"role": "system", "content": "你是专业严谨的A股资深投资顾问，所有分析必须基于真实数据，绝对不能编造信息"},
+                {"role": "user", "content": prompt}
+            ],
+            temperature=0.4,
+            max_tokens=2000,
+            stream=False,
+            timeout=120
+        )
+        final_analysis = response.choices[0].message.content
+    except Exception as ai_error:
+        # DeepSeek调用失败兜底，直接输出Tavily整理的核心数据，不会全流程崩
+        final_analysis = f"⚠️ AI深度分析暂时不可用，已为你整理{stock_code}的全维度核心数据\n\n{full_raw_data}"
 
     # 拼接最终报告，完全兼容钉钉推送
-    final_report = f"📈 {stock_code} 深度分析报告\n\n{response.choices[0].message.content}"
+    final_report = f"📊 {stock_code} 双引擎全维度深度分析报告\n\n{final_analysis}\n\n📌 本报告数据均来自交易所官网、权威财经媒体，仅供参考，不构成任何投资建议。股市有风险，投资需谨慎。"
 
 except Exception as e:
-    # 全链路容错，给明确的报错提示，不会直接崩溃
-    final_report = f"❌ 分析失败\n股票代码：{stock_code}\n错误原因：{str(e)}\n\n排查建议：\n1. 确认股票代码格式正确（沪市加.SH 深市加.SZ）\n2. 核对DeepSeek、Tavily密钥名称是否正确，API额度是否充足\n3. 确认股票是正常交易的A股，没有停牌/退市"
+    # 全链路容错，给明确的报错提示，方便你排查
+    final_report = f"❌ 深度分析失败\n股票代码：{stock_code}\n错误原因：{str(e)}\n\n排查建议：\n1. 确认股票代码格式正确（沪市加.SH 深市加.SZ）\n2. 核对DeepSeek、Tavily密钥名称是否正确，API额度是否充足\n3. 确认股票是正常交易的A股，没有停牌/退市"
 
-# 保存报告，完全兼容你之前的钉钉推送配置，不用改任何东西
+# 保存报告，100%兼容你之前的钉钉推送配置，不用改任何东西
 with open("result.txt", "w", encoding="utf-8") as f:
     f.write(final_report)
 
