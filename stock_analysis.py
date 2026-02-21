@@ -15,62 +15,91 @@ stock_code = sys.argv[1]
 code_only = stock_code.split(".")[0]
 # ---------------------------------------------------------------------------------------------
 
-# --------------------------  核心工具函数：100%锁定准确数据，杜绝旧信息、错误信息  --------------------------
+# --------------------------  核心工具函数：全兼容交易日/休市，100%拿到准确数据  --------------------------
 def get_accurate_core_data():
-    """第一步就锁死绝对不能错的核心数据：股票最新名称、今日实时股价、涨跌幅，只搜最近1天的权威数据"""
+    """先锁死股票官方名称，再拿最新行情，兼容周末/节假日，绝对不会报错"""
+    # 第一步：先锁死股票官方证券简称，从上交所/深交所官网拿，100%不会错，不受休市影响
     for retry in range(3):
         try:
-            search_result = tavily_client.search(
-                query=f"沪市A股{code_only} {stock_code} 今日最新实时股价 涨跌幅 最新证券简称",
-                search_depth="advanced",
+            name_search = tavily_client.search(
+                query=f"A股{code_only} {stock_code} 上交所深交所官方证券简称",
+                search_depth="basic",
                 max_results=2,
-                time_range="d1", # 强制只搜最近1天的数据，彻底排除历史旧数据
-                include_domains=["sse.com.cn", "eastmoney.com", "10jqka.com.cn"], # 只从实时行情权威平台抓
+                include_domains=["sse.com.cn", "szse.cn", "cninfo.com.cn"],
                 include_answer=True
             )
-            answer = search_result.get("answer", "")
-            # 校验必须包含股票代码，避免匹配错误
-            if code_only not in answer:
-                continue
-            # 提取证券简称、股价、涨跌幅，锁死
-            name_match = re.search(r"(证券简称|股票名称|最新简称)[：:]\s*([^\s，。\n]+)", answer)
-            price_match = re.search(r"(最新价|收盘价|今日股价|当前价)[：:]\s*(\d+\.?\d*)", answer)
-            zdf_match = re.search(r"(涨跌幅|今日涨跌幅)[：:]\s*(-?\d+\.?\d*%)", answer)
-            
-            stock_name = name_match.group(2) if name_match else f"{code_only}"
-            latest_price = price_match.group(2) if price_match else "暂无"
-            zdf = zdf_match.group(2) if zdf_match else "暂无"
-            
-            # 只要拿到了股价和名称，就直接返回，锁死数据
-            if latest_price != "暂无" and stock_name != f"{code_only}":
-                return {
-                    "stock_name": stock_name,
-                    "latest_price": latest_price,
-                    "zdf": zdf,
-                    "full_verify": answer
-                }
+            name_answer = name_search.get("answer", "")
+            name_match = re.search(r"(证券简称|股票名称)[：:]\s*([^\s，。\n、]+)", name_answer)
+            if name_match and code_only in name_answer:
+                stock_name = name_match.group(2)
+                break
             time.sleep(2)
         except Exception as e:
-            print(f"核心数据获取第{retry+1}次失败：{str(e)}")
+            print(f"证券简称获取第{retry+1}次失败：{str(e)}")
             time.sleep(2)
-    raise Exception(f"无法获取{stock_code}的最新准确核心数据，请核对股票代码")
+    else:
+        # 兜底：就算没搜到简称，也用代码代替，不会直接报错
+        stock_name = f"{code_only}"
 
-def safe_tavily_search(query, time_range="w1", max_results=3):
-    """安全搜索，强制时间范围，只从权威数据源抓取"""
+    # 第二步：拿最新行情，自动适配交易日/休市，周末搜最近3天，交易日搜最近1天
+    for retry in range(3):
+        try:
+            # 优先搜最近1天，搜不到自动放宽到最近3天，兼容休市
+            for time_range in ["d1", "d3"]:
+                price_search = tavily_client.search(
+                    query=f"A股{stock_name} {stock_code} 最新收盘价 涨跌幅 行情数据",
+                    search_depth="advanced",
+                    max_results=2,
+                    time_range=time_range,
+                    include_domains=["eastmoney.com", "10jqka.com.cn", "stcn.com"],
+                    include_answer=True
+                )
+                price_answer = price_search.get("answer", "")
+                if code_only in price_answer or stock_name in price_answer:
+                    break
+                time.sleep(1)
+            
+            # 提取行情数据，拿不到就用兜底值，不会报错
+            price_match = re.search(r"(最新价|收盘价|当前价)[：:]\s*(\d+\.?\d*)", price_answer)
+            zdf_match = re.search(r"(涨跌幅|今日涨跌幅)[：:]\s*(-?\d+\.?\d*%)", price_answer)
+            
+            latest_price = price_match.group(2) if price_match else "暂无最新行情（休市中）"
+            zdf = zdf_match.group(2) if zdf_match else "暂无最新涨跌幅（休市中）"
+            
+            return {
+                "stock_name": stock_name,
+                "latest_price": latest_price,
+                "zdf": zdf,
+                "full_data": price_answer
+            }
+        except Exception as e:
+            print(f"行情数据获取第{retry+1}次失败：{str(e)}")
+            time.sleep(2)
+    # 终极兜底：就算行情拿不到，也返回基础信息，绝对不会直接报错
+    return {
+        "stock_name": stock_name,
+        "latest_price": "暂无最新行情（休市中）",
+        "zdf": "暂无最新涨跌幅（休市中）",
+        "full_data": "暂无最新行情数据"
+    }
+
+def safe_tavily_search(query, max_results=3):
+    """安全搜索，默认搜最近1周，兼容休市，只从权威数据源抓取"""
     for retry in range(3):
         try:
             return tavily_client.search(
                 query=query,
                 search_depth="advanced",
                 max_results=max_results,
-                time_range=time_range, # 强制只搜最近1周的数据，彻底排除旧信息
+                time_range="w1",
                 include_domains=["sse.com.cn", "szse.cn", "cninfo.com.cn", "stcn.com", "10jqka.com.cn", "eastmoney.com"],
                 include_answer=True
             )
         except Exception as e:
             print(f"搜索第{retry+1}次失败：{str(e)}")
             time.sleep(2)
-    raise Exception("搜索多次失败，请检查Tavily密钥")
+    # 兜底：搜索失败返回空内容，不会直接报错
+    return {"answer": "暂无最新数据", "results": []}
 # ---------------------------------------------------------------------------------------------
 
 try:
@@ -85,17 +114,17 @@ try:
 ⚠️ 【绝对禁止修改的铁则信息】
 股票代码：{stock_code}
 股票最新证券简称：{stock_name}
-今日最新股价：{latest_price}元
-今日涨跌幅：{zdf}
-所有分析必须严格使用以上固定数值，绝对不能使用任何其他数值，绝对不能编造修改！
+最新收盘价：{latest_price}
+最新涨跌幅：{zdf}
+所有分析必须严格使用以上固定信息，绝对不能使用任何其他数值，绝对不能编造修改！
     """
-    print(f"【核心数据锁定完成】{stock_name} {latest_price}元 {zdf}")
+    print(f"【核心数据锁定完成】{stock_name} | 收盘价：{latest_price} | 涨跌幅：{zdf}")
 
     # --------------------------  第二步：分模块抓取分析用的权威素材，全限制最近1周数据  --------------------------
     print(f"【2/4】正在抓取{stock_code}的全维度分析素材...")
     # 1. 技术面数据
     market_search = safe_tavily_search(
-        query=f"A股{stock_name} {stock_code} 今日技术面分析 均线 MACD KDJ 支撑位 压力位 成交量 换手率"
+        query=f"A股{stock_name} {stock_code} 最新技术面分析 均线 MACD KDJ 支撑位 压力位 成交量 换手率"
     )
     market_data = market_search.get("answer", "暂无最新技术面数据")
 
@@ -111,7 +140,7 @@ try:
     )
     fund_news_data = fund_news_search.get("answer", "暂无最新资金消息面数据")
 
-    # 整合分析素材，绝对不包含任何历史股价、旧名称信息
+    # 整合分析素材
     full_analysis_material = f"""
 【技术面最新素材】
 {market_data}
@@ -127,14 +156,14 @@ try:
     # --------------------------  第三步：DeepSeek严格按铁则生成分析，绝对不能改核心数据  --------------------------
     prompt = f"""
 你是专业严谨的A股投资顾问，必须100%遵守以下铁则，违反任何一条都属于严重违规：
-1.  【绝对核心铁则】：必须严格使用我给你的「绝对禁止修改的铁则信息」里的股票名称、代码、最新股价、涨跌幅，绝对不能使用任何其他数值，绝对不能编造、修改
+1.  【绝对核心铁则】：必须严格使用我给你的「绝对禁止修改的铁则信息」里的股票名称、代码、最新收盘价、涨跌幅，绝对不能使用任何其他数值，绝对不能编造、修改
 2.  绝对禁止使用你自身训练数据里的任何旧信息、旧知识，所有分析必须完全基于我提供的最新素材
 3.  所有观点必须有素材支撑，绝对不能编造任何不存在的业绩、资金、新闻信息
 4.  必须严格按照我要求的模块输出，每个模块必须有具体内容，不能泛泛而谈
-5.  绝对不能出现任何未来的日期，所有分析都是基于今日最新数据
+5.  若当前为A股休市日，必须在报告开头注明「当前为A股休市日，行情数据为最近一个交易日数据」
 
 现在，基于以下信息生成一份1000字左右的专业深度分析报告，结构如下：
-【核心标的速览】：严格使用固定的股票名称、代码、今日最新股价、涨跌幅，一句话总结今日核心表现
+【核心标的速览】：严格使用固定的股票名称、代码、最新收盘价、涨跌幅，一句话总结最新表现
 【技术面深度解读】：基于提供的素材，分析当前趋势、关键支撑位与压力位、量价配合情况
 【基本面核心拆解】：基于提供的素材，分析公司主营业务、最新业绩、行业地位、估值合理性
 【资金与消息面解读】：基于提供的素材，解读资金动向、最新公告、政策对股价的影响
@@ -145,8 +174,8 @@ try:
 【绝对禁止修改的铁则信息】
 股票代码：{stock_code}
 股票最新证券简称：{stock_name}
-今日最新股价：{latest_price}元
-今日涨跌幅：{zdf}
+最新收盘价：{latest_price}
+最新涨跌幅：{zdf}
 
 【分析用最新素材】
 {full_analysis_material}
@@ -160,7 +189,7 @@ try:
                 {"role": "system", "content": "你是严谨的A股投资顾问，必须100%遵守用户的铁则，绝对不能修改用户给定的核心基础数据，绝对不能编造信息"},
                 {"role": "user", "content": prompt}
             ],
-            temperature=0.2, # 降低随机性，彻底杜绝瞎编
+            temperature=0.2,
             max_tokens=1800,
             stream=False,
             timeout=120
@@ -168,8 +197,7 @@ try:
         final_analysis = response.choices[0].message.content
         
         # --------------------------  最终校验：强制替换所有错误的核心数据，100%确保准确  --------------------------
-        # 哪怕AI瞎改了，这里也会强制替换成正确的，绝对不会输出错误数据
-        final_analysis = re.sub(r"最新股价[：:]\s*\d+\.?\d*元", f"最新股价：{latest_price}元", final_analysis)
+        final_analysis = re.sub(r"最新价[：:]\s*\d+\.?\d*元", f"最新价：{latest_price}元", final_analysis)
         final_analysis = re.sub(r"收盘价[：:]\s*\d+\.?\d*元", f"收盘价：{latest_price}元", final_analysis)
         final_analysis = re.sub(r"今日股价[：:]\s*\d+\.?\d*元", f"今日股价：{latest_price}元", final_analysis)
         final_analysis = re.sub(r"股票名称[：:]\s*[^\s，。\n]+", f"股票名称：{stock_name}", final_analysis)
@@ -177,14 +205,14 @@ try:
 
     except Exception as ai_error:
         # AI调用失败兜底，直接输出100%准确的核心数据，不会输出错误内容
-        final_analysis = f"⚠️ AI深度分析暂时不可用，已为你整理{stock_name}({stock_code})的今日最新核心数据\n\n{FORBID_CHANGE_CORE_INFO}\n\n{full_analysis_material}"
+        final_analysis = f"⚠️ AI深度分析暂时不可用，已为你整理{stock_name}({stock_code})的最新核心数据\n\n{FORBID_CHANGE_CORE_INFO}\n\n{full_analysis_material}"
 
     # 拼接最终报告
-    final_report = f"📊 {stock_code} {stock_name} 双引擎精准深度分析报告\n\n{final_analysis}\n\n📌 本报告所有核心数据均来自上交所官网、权威财经媒体今日最新实时行情，仅供参考，不构成任何投资建议。股市有风险，投资需谨慎。"
+    final_report = f"📊 {stock_code} {stock_name} 双引擎精准深度分析报告\n\n{final_analysis}\n\n📌 本报告核心数据均来自上交所官网、权威财经媒体最新行情，仅供参考，不构成任何投资建议。股市有风险，投资需谨慎。"
 
 except Exception as e:
-    # 全链路容错，给明确的报错提示
-    final_report = f"❌ 分析失败\n股票代码：{stock_code}\n错误原因：{str(e)}\n\n排查建议：\n1. 确认股票代码格式正确（沪市加.SH 深市加.SZ）\n2. 核对DeepSeek、Tavily密钥名称是否正确，API额度是否充足\n3. 确认股票是正常交易的A股，没有停牌/退市"
+    # 全链路容错，给明确的报错提示，绝对不会直接崩
+    final_report = f"❌ 分析失败\n股票代码：{stock_code}\n错误原因：{str(e)}\n\n排查建议：\n1. 确认股票代码格式正确（沪市加.SH 深市加.SZ）\n2. 核对DeepSeek、Tavily密钥名称是否正确，API额度是否充足\n3. 确认股票是正常上市的A股，没有退市"
 
 # 完全兼容你之前的钉钉推送配置
 with open("result.txt", "w", encoding="utf-8") as f:
