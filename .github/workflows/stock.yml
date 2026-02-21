@@ -4,12 +4,9 @@ on:
   workflow_dispatch:
     inputs:
       stock_code:
-        description: "输入股票代码 沪市加.SH 深市加.SZ 例：600519.SH"
+        description: "输入股票代码 沪市加.SH 深市加.SZ 例：601777.SH"
         required: true
-        default: "600519.SH"
-  # 可选：交易日收盘后自动分析你的自选股，需要的话取消下面两行的注释即可
-  # schedule:
-  #   - cron: "0 8 * * 1-5" # 北京时间周一到周五16:00（A股收盘后）
+        default: "601777.SH"
 
 jobs:
   analysis-and-send:
@@ -25,17 +22,16 @@ jobs:
 
       - name: 安装所有依赖库（自动安装，不用你管）
         run: |
-          pip install akshare
-          pip install google-generativeai
           pip install tavily-python
+          pip install openai
 
-      - name: 运行股票深度分析（自动加载你已有的3个密钥）
+      - name: 运行股票深度分析（自动加载你配置的3个密钥）
         env:
-          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
           TAVILY_API_KEY: ${{ secrets.TAVILY_API_KEY }}
         run: python stock_analysis.py ${{ inputs.stock_code }}
 
-      - name: 推送分析报告到钉钉（复用你已有的配置）
+      - name: 推送分析报告到钉钉（完全复用你已有的钉钉配置）
         env:
           DINGTALK_WEBHOOK: ${{ secrets.DINGTALK_WEBHOOK }}
           DINGTALK_SECRET: ${{ secrets.DINGTALK_SECRET }}
