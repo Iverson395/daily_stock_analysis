@@ -1,17 +1,32 @@
 name: 钉钉通知测试
 on:
-  workflow_dispatch: # 允许手动点击触发测试，不用改代码
+  workflow_dispatch: # 允许手动点击触发，无需修改
 
 jobs:
   send-dingtalk-msg:
     runs-on: ubuntu-latest
     steps:
       - name: 发送钉钉测试消息
-        uses: coolwinterpro/dingtalk-robot-action@v1.1.0
-        with:
-          webhook: ${{ secrets.DINGTALK_WEBHOOK }}
-          secret: ${{ secrets.DINGTALK_SECRET }}
-          msgtype: text
-          text_content: |
-            🔔 钉钉通知测试成功！
-            恭喜你，配置完全正确，消息可以正常推送啦~
+        env:
+          # 直接复用你之前填好的两个密钥，不用改任何内容
+          DINGTALK_WEBHOOK: ${{ secrets.DINGTALK_WEBHOOK }}
+          DINGTALK_SECRET: ${{ secrets.DINGTALK_SECRET }}
+        run: |
+          # 1. 自动生成钉钉要求的时间戳（毫秒级）
+          timestamp=$(date +%s%3N)
+          
+          # 2. 自动计算钉钉加签签名，完全符合钉钉官方规则
+          sign=$(echo -n "$timestamp\n$DINGTALK_SECRET" | openssl dgst -sha256 -hmac "$DINGTALK_SECRET" -binary | base64 | tr -d '\n' | sed 's/+/%2B/g; s/\//%2F/g; s/=/%3D/g')
+          
+          # 3. 拼接最终的钉钉消息推送地址
+          final_url="${DINGTALK_WEBHOOK}&timestamp=${timestamp}&sign=${sign}"
+          
+          # 4. 发送测试消息到钉钉群
+          curl -s -X POST "$final_url" \
+            -H "Content-Type: application/json" \
+            -d '{
+              "msgtype": "text",
+              "text": {
+                "content": "🔔 钉钉通知测试成功！\n恭喜你，配置完全正确，消息可以正常推送啦~"
+              }
+            }'
