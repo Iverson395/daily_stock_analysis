@@ -11,24 +11,36 @@ jobs:
           DINGTALK_WEBHOOK: ${{ secrets.DINGTALK_WEBHOOK }}
           DINGTALK_SECRET: ${{ secrets.DINGTALK_SECRET }}
         run: |
-          # 打印密钥加载状态（不会泄露完整地址，只看有没有成功读取）
-          echo "Webhook加载状态：${DINGTALK_WEBHOOK:0:30}......"
-          echo "加签密钥加载状态：${DINGTALK_SECRET:0:10}......"
+          # 1. 校验密钥是否成功加载（不会泄露完整信息，仅确认读取正常）
+          echo "=== 配置加载校验 ==="
+          if [ -z "$DINGTALK_WEBHOOK" ] || [ -z "$DINGTALK_SECRET" ]; then
+            echo "❌ 密钥加载失败，请检查Secrets名称是否正确"
+            exit 1
+          fi
+          echo "✅ Webhook加载成功：${DINGTALK_WEBHOOK:0:35}......"
+          echo "✅ 加签密钥加载成功：${DINGTALK_SECRET:0:15}......"
 
-          # 1. 生成钉钉要求的时间戳
+          # 2. 生成钉钉官方要求的13位毫秒级时间戳
           timestamp=$(date +%s%3N)
-          echo "生成的时间戳：$timestamp"
+          echo -e "\n=== 签名参数 ==="
+          echo "生成的13位时间戳：$timestamp"
 
-          # 2. 计算钉钉加签签名
-          sign=$(echo -n "$timestamp\n$DINGTALK_SECRET" | openssl dgst -sha256 -hmac "$DINGTALK_SECRET" -binary | base64 | tr -d '\n' | sed 's/+/%2B/g; s/\//%2F/g; s/=/%3D/g')
-          echo "生成的签名：$sign"
+          # 3. 【核心修复】完全符合钉钉官方规范的签名生成
+          # 官方要求：签名字符串 = 时间戳 + 换行符(\n) + 机器人加签密钥
+          # 用printf替代echo，100%解决换行转义兼容问题
+          sign_string=$(printf "%s\n%s" "$timestamp" "$DINGTALK_SECRET")
+          
+          # 官方要求：HmacSHA256加密 → Base64编码 → URL编码
+          sign=$(echo -n "$sign_string" | openssl dgst -sha256 -hmac "$DINGTALK_SECRET" -binary | base64 | tr -d '\n' | sed 's/+/%2B/g; s/\//%2F/g; s/=/%3D/g')
+          echo "生成的最终签名：$sign"
 
-          # 3. 拼接最终推送地址
+          # 4. 拼接官方要求的完整请求地址（时间戳+签名必须都拼在URL里）
           final_url="${DINGTALK_WEBHOOK}&timestamp=${timestamp}&sign=${sign}"
-          echo "最终请求地址：${final_url:0:50}......"
+          echo -e "\n=== 最终请求地址 ==="
+          echo "${final_url:0:60}......"
 
-          # 4. 发送消息，打印钉钉完整返回结果（核心！能看到所有错误）
-          echo "===== 钉钉接口返回结果 ====="
+          # 5. 发送消息，打印钉钉官方完整返回结果
+          echo -e "\n=== 钉钉官方接口返回结果 ==="
           curl -X POST "$final_url" \
             -H "Content-Type: application/json" \
             -d '{
@@ -37,4 +49,4 @@ jobs:
                 "content": "🔔 钉钉通知测试成功！\n恭喜你，配置完全正确，消息可以正常推送啦~"
               }
             }'
-          echo -e "\n===== 请求结束 ====="
+          echo -e "\n=== 请求执行完成 ==="
