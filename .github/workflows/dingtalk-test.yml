@@ -1,0 +1,17 @@
+name: 钉钉通知测试
+on:
+  workflow_dispatch: # 允许手动点击触发测试，不用改代码
+
+jobs:
+  send-dingtalk-msg:
+    runs-on: ubuntu-latest
+    steps:
+      - name: 发送钉钉测试消息
+        uses: coolwinterpro/dingtalk-robot-action@v1.1.0
+        with:
+          webhook: ${{ secrets.DINGTALK_WEBHOOK }}
+          secret: ${{ secrets.DINGTALK_SECRET }}
+          msgtype: text
+          text_content: |
+            🔔 钉钉通知测试成功！
+            恭喜你，配置完全正确，消息可以正常推送啦~
