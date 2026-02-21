@@ -1,0 +1,35 @@
+name: 股票分析钉钉推送
+on:
+  workflow_dispatch:
+    inputs:
+      stock_code:
+        description: "输入股票代码 例：600519.SH"
+        required: true
+        default: "600519.SH"
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+
+      - name: Install akshare
+        run: pip install akshare
+
+      - name: Run analysis
+        run: python stock_analysis.py ${{ inputs.stock_code }}
+
+      - name: Send to DingTalk
+        env:
+          DINGTALK_WEBHOOK: ${{ secrets.DINGTALK_WEBHOOK }}
+          DINGTALK_SECRET: ${{ secrets.DINGTALK_SECRET }}
+        run: |
+          msg=$(cat result.txt)
+          ts=$(date +%s%3N)
+          sign=$(echo -n "$ts\n$DINGTALK_SECRET" | openssl dgst -sha256 -hmac "$DINGTALK_SECRET" -binary | base64 | tr -d '\n' | sed 's/+/%2B/g; s/\//%2F/g; s/=/%3D/g')
+          url="$DINGTALK_WEBHOOK&timestamp=$ts&sign=$sign"
+          curl -X POST "$url" -H "Content-Type: application/json" -d '{"msgtype":"text","text":{"content":"'"$msg"'"}}'
