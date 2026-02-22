@@ -36,8 +36,9 @@ jobs:
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
           OPENAI_BASE_URL: ${{ secrets.OPENAI_BASE_URL }}
           OPENAI_MODEL: ${{ secrets.OPENAI_MODEL }}
-          # 2. 你已配置的钉钉推送（必填）
-          CUSTOM_WEBHOOK_URLS: ${{ secrets.CUSTOM_WEBHOOK_URLS }}
+          # 2. 钉钉推送配置
+        CUSTOM_WEBHOOK_URLS: ${{ secrets.CUSTOM_WEBHOOK_URLS }}
+        DINGTALK_SECRET: ${{ secrets.DINGTALK_SECRET }}
           # 3. 你已配置的Tavily新闻搜索（必填）
           TAVILY_API_KEYS: ${{ secrets.TAVILY_API_KEYS }}
           # 4. 批量分析股票列表（必填，手动输代码时优先用手动输入的）
