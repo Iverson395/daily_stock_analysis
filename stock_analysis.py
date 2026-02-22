@@ -1,247 +1,253 @@
-from openai import OpenAI
-from tavily import TavilyClient
 import sys
 import os
-import time
-import re
+import requests
+import pandas as pd
+import akshare as ak
+import yfinance as yf
+from datetime import datetime, timedelta
+from openai import OpenAI
+from tavily import TavilyClient
 
-# --------------------------  完全复用你已有的配置，无需修改任何内容  --------------------------
-deepseek_client = OpenAI(
-    api_key=os.getenv("DEEPSEEK_API_KEY"),
-    base_url="https://api.deepseek.com"
-)
-tavily_client = TavilyClient(api_key=os.getenv("TAVILY_API_KEY"))
-
-# 自动判断运行模式：手动输入单只代码就用单只模式，没输入就用STOCK_LIST批量模式
-input_stock_code = os.getenv("INPUT_STOCK_CODE", "")
-stock_list_env = os.getenv("STOCK_LIST", "")
-
-# 模式判断+空值友好处理，彻底解决空值报错问题
-if input_stock_code and input_stock_code.strip() != "":
-    run_mode = "single"
-    stock_code_list = [input_stock_code.strip()]
-    print(f"【运行模式】单只股票分析：{input_stock_code}")
-elif stock_list_env and stock_list_env.strip() != "":
-    run_mode = "batch"
-    stock_code_list = [code.strip() for code in stock_list_env.split(",") if code.strip() != ""]
-    print(f"【运行模式】批量分析，共{len(stock_code_list)}只股票：{stock_code_list}")
-else:
-    run_mode = "empty"
-    stock_code_list = []
-    print(f"【警告】未输入股票代码，也未配置STOCK_LIST，生成提示报告")
-# ---------------------------------------------------------------------------------------------
-
-# --------------------------  核心工具函数：开源系统同款稳定数据抓取  --------------------------
-def auto_recognize_market(full_code):
-    """自动识别股票所属市场，动态匹配最优数据源"""
-    code_split = full_code.split(".")
-    code_main = code_split[0]
-    code_suffix = code_split[1].upper() if len(code_split) > 1 else ""
-
-    market_rule_map = {
-        "SH": {"market_name": "A股沪市", "exchange": "上海证券交易所", "stable_domains": ["eastmoney.com", "10jqka.com.cn", "finance.sina.com.cn", "stcn.com", "xueqiu.com"]},
-        "SZ": {"market_name": "A股深市", "exchange": "深圳证券交易所", "stable_domains": ["eastmoney.com", "10jqka.com.cn", "finance.sina.com.cn", "stcn.com", "xueqiu.com"]},
-        "HK": {"market_name": "港股", "exchange": "香港联合交易所", "stable_domains": ["aastocks.com", "hkex.com.hk", "eastmoney.com", "finance.yahoo.com"]},
-        "O": {"market_name": "美股", "exchange": "纽约证券交易所", "stable_domains": ["finance.yahoo.com", "nasdaq.com", "nyse.com", "marketwatch.com"]},
-        "NASDAQ": {"market_name": "美股纳斯达克", "exchange": "纳斯达克证券交易所", "stable_domains": ["nasdaq.com", "finance.yahoo.com", "marketwatch.com"]}
-    }
-
-    if code_suffix in market_rule_map:
-        market_info = market_rule_map[code_suffix]
+# ===================== 1. 核心参数读取（和yml完全匹配，解决报错）=====================
+if __name__ == "__main__":
+    # 优先级1：手动运行时输入的股票代码（即时分析用）
+    input_stock = sys.argv[1] if len(sys.argv) > 1 else ""
+    # 优先级2：Secrets里配置的批量股票列表
+    secret_stock = os.getenv("STOCK_LIST", "")
+    
+    # 解析最终股票列表，都没有就弹出提示退出
+    stock_list = []
+    if input_stock.strip():
+        stock_list = [s.strip() for s in input_stock.split(",") if s.strip()]
+    elif secret_stock.strip():
+        stock_list = [s.strip() for s in secret_stock.split(",") if s.strip()]
     else:
-        market_info = {
-            "market_name": "全球市场",
-            "exchange": "对应证券交易所",
-            "stable_domains": ["bloomberg.com", "reuters.com", "finance.yahoo.com", "marketwatch.com"]
-        }
+        print("📌 股票分析提示")
+        print("您未手动输入股票代码，也未在GitHub Secrets中配置STOCK_LIST，请按以下方式操作：")
+        print("1. 单只股票分析：触发运行时，在输入框中填写完整股票代码（例：601777.SH）")
+        print("2. 批量股票分析：在GitHub Secrets中新建STOCK_LIST，填写多只股票代码，用英文逗号分隔（例：601777.SH,000001.SZ）")
+        print("\n📌 股市有风险，投资需谨慎。")
+        sys.exit(1)
+    print(f"✅ 成功获取待分析股票列表：{stock_list}")
 
-    market_info["code_main"] = code_main
-    market_info["code_suffix"] = code_suffix
-    market_info["full_code"] = full_code
-    return market_info
-
-def get_stock_full_info(market_info, stock_name):
-    """开源系统同款全维度数据抓取，一次性拿齐分析所需所有素材"""
-    stock_full_code = market_info["full_code"]
-    stable_domains = market_info["stable_domains"]
-    market_name = market_info["market_name"]
-
-    # 梯度query，从精准到宽泛，休市期也能稳定拿到数据
-    query_list = [
-        f"{stock_full_code} {stock_name} 最新收盘价 涨跌幅 成交量 均线 MACD KDJ 支撑位 压力位 业绩 净利润 行业排名 主力资金 北向资金 最新公告 行业新闻",
-        f"{stock_full_code} {stock_name} 2026年2月 行情数据 基本面分析 技术面分析",
-        f"{stock_name} {market_name} 股票 最新分析 核心数据"
-    ]
-
-    for query in query_list:
-        for retry in range(2):
-            try:
-                search_result = tavily_client.search(
-                    query=query, search_depth="advanced", max_results=4, time_range="m1", include_domains=stable_domains, include_answer=True
-                )
-                full_content = search_result.get("answer", "")
-                for item in search_result.get("results", []):
-                    full_content += f"\n{item['content']}"
-                
-                if len(full_content) > 200:
-                    return full_content
-                time.sleep(1)
-            except Exception as e:
-                print(f"数据抓取失败：{str(e)}")
-                time.sleep(1)
-    return "暂无足够分析素材，基于基础信息进行分析"
-# ---------------------------------------------------------------------------------------------
-
-# --------------------------  单只股票分析：开源系统同款决策仪表盘+打分系统  --------------------------
-def generate_single_stock_dashboard(stock_full_code):
-    print(f"\n==================== 正在分析：{stock_full_code} ====================")
-    # 1. 识别市场+获取基础信息
-    market_info = auto_recognize_market(stock_full_code)
-    market_name = market_info["market_name"]
-    code_main = market_info["code_main"]
-    stable_domains = market_info["stable_domains"]
-
-    # 2. 锁定股票基础信息
-    base_search = tavily_client.search(
-        query=f"{stock_full_code} {code_main} 股票简称 公司名称 主营业务 所属行业",
-        search_depth="basic", max_results=2, include_domains=stable_domains, include_answer=True
-    )
-    base_content = base_search.get("answer", "")
-    name_match = re.search(r"(股票简称|证券简称|公司名称)[：:]\s*([^\s，。\n、()（）]+)", base_content)
-    business_match = re.search(r"(主营业务|主要产品)[：:]\s*([^\n。]+)", base_content)
-    industry_match = re.search(r"(所属行业|行业分类)[：:]\s*([^\n。，]+)", base_content)
-
-    stock_name = name_match.group(2) if name_match else f"{code_main}"
-    business_info = business_match.group(2) if business_match else "暂无公开主营业务信息"
-    industry_info = industry_match.group(2) if industry_match else "暂无公开所属行业信息"
-    print(f"基础信息锁定：{stock_name} | {industry_info}")
-
-    # 3. 获取全维度分析素材
-    full_material = get_stock_full_info(market_info, stock_name)
-    print(f"素材抓取完成，正在生成决策仪表盘...")
-
-    # 4. AI生成开源系统同款决策仪表盘+完整分析
-    prompt = f"""
-你是专业严谨的A股投资顾问，必须严格按照以下规则生成股票分析决策仪表盘，禁止编造任何信息：
-1.  严格基于我提供的素材进行分析，所有数据、观点必须有依据，禁止瞎编
-2.  严格执行100分制加权打分规则，每个维度必须给出分数+明确依据，综合评分对应投资评级
-3.  必须给出精确的买卖点位：买入参考价、止损价、目标价
-4.  必须给出交易纪律检查清单，每项按「满足/注意/不满足」标记
-5.  结构严格按照我给的格式输出，语言简洁精炼，适合散户快速阅读
-
-【100分制打分规则】
-- 基本面评分（35分）：看业绩、行业地位、估值合理性
-- 技术面评分（25分）：看趋势、量价配合、支撑压力位
-- 资金面评分（20分）：看主力资金、北向资金、机构关注度
-- 消息面评分（15分）：看政策利好、公司公告、行业景气度
-- 风险扣分项（最多扣10分）：利空、退市风险、业绩暴雷等
-综合评分=各项分数相加-风险扣分，满分100分
-
-【投资评级规则】
-90分及以上：★★★★★ 强烈关注 | 75-89分：★★★★ 积极关注 | 60-74分：★★★ 谨慎关注 | 40-59分：★★ 谨慎规避 | 40分以下：★ 高风险规避
-
-【输出格式，必须严格遵守】
-📊 {stock_name}({stock_full_code}) 决策仪表盘
-🏷️ 综合评分：XX分 | 投资评级：XX
-📈 最新收盘价：XX元 | 最新涨跌幅：XX%
-🎯 精确点位：买入参考价XX元 | 止损价XX元 | 目标价XX元
-
-【分维度打分详情】
-1.  基本面：XX分/35分 | 打分依据：XXX
-2.  技术面：XX分/25分 | 打分依据：XXX
-3.  资金面：XX分/20分 | 打分依据：XXX
-4.  消息面：XX分/15分 | 打分依据：XXX
-5.  风险扣分：XX分 | 扣分依据：XXX
-
-【交易纪律检查清单】
-- 趋势健康度：满足/注意/不满足 | 说明：XXX
-- 量价配合度：满足/注意/不满足 | 说明：XXX
-- 基本面健康度：满足/注意/不满足 | 说明：XXX
-- 资金关注度：满足/注意/不满足 | 说明：XXX
-- 舆情风险度：满足/注意/不满足 | 说明：XXX
-
-【核心观点】
-一句话总结这只股票的投资价值和核心逻辑
-
-【利好催化】
-1.  XXX
-2.  XXX
-
-【风险提示】
-1.  XXX
-2.  XXX
-
-【操作策略】
-- 持仓者：XXX
-- 空仓者：XXX
-
-【股票基础信息】
-所属市场：{market_name}
-所属行业：{industry_info}
-主营业务：{business_info}
-
-【分析素材】
-{full_material}
-    """
-
-    # 调用AI生成报告
+    # ===================== 2. 环境配置初始化（你的DeepSeek/钉钉/Tavily）=====================
+    # 2.1 DeepSeek AI模型初始化（OpenAI兼容格式）
     try:
-        response = deepseek_client.chat.completions.create(
-            model="deepseek-chat",
-            messages=[
-                {"role": "system", "content": "你是专业严谨的股票投资顾问，严格按照用户要求生成决策仪表盘，禁止编造任何信息，所有分析必须基于提供的素材"},
-                {"role": "user", "content": prompt}
-            ],
-            temperature=0.3,
-            max_tokens=2200,
-            stream=False,
-            timeout=120
+        client = OpenAI(
+            api_key=os.getenv("OPENAI_API_KEY"),
+            base_url=os.getenv("OPENAI_BASE_URL", "https://api.deepseek.com/v1")
         )
-        dashboard_content = response.choices[0].message.content
-    except Exception as ai_error:
-        dashboard_content = f"""
-📊 {stock_name}({stock_full_code}) 分析报告
-🏷️ 综合评分：暂无 | 投资评级：暂无
-📈 最新收盘价：暂无 | 最新涨跌幅：暂无
-【基础信息】
-所属市场：{market_name}
-所属行业：{industry_info}
-主营业务：{business_info}
-【操作建议】
-当前暂无足够分析数据，建议等待开盘后获取最新行情再做决策，股市有风险，投资需谨慎。
-        """
+        ai_model = os.getenv("OPENAI_MODEL", "deepseek-chat")
+        print("✅ DeepSeek AI模型初始化成功")
+    except Exception as e:
+        print(f"❌ DeepSeek初始化失败：{e}")
+        sys.exit(1)
 
-    print(f"==================== {stock_full_code} 分析完成 ====================")
-    time.sleep(3)
-    return dashboard_content
-# ---------------------------------------------------------------------------------------------
+    # 2.2 Tavily新闻搜索初始化
+    try:
+        tavily_client = TavilyClient(api_key=os.getenv("TAVILY_API_KEYS").split(",")[0])
+        news_max_days = int(os.getenv("NEWS_MAX_AGE_DAYS", 3))
+        print("✅ Tavily新闻搜索初始化成功")
+    except Exception as e:
+        print(f"❌ Tavily初始化失败：{e}")
+        sys.exit(1)
 
-# --------------------------  主程序：批量/单只模式执行  --------------------------
-try:
-    if run_mode == "empty":
-        full_final_report = f"""
-📌 股票分析提示
-您未手动输入股票代码，也未在GitHub Secrets中配置STOCK_LIST，请按以下方式操作：
-1.  单只股票分析：触发运行时，在输入框中填写完整股票代码（例：601777.SH）
-2.  批量股票分析：在GitHub Secrets中新建STOCK_LIST，填写多只股票代码，用英文逗号分隔（例：601777.SH,000001.SZ）
-
-📌 股市有风险，投资需谨慎。
-        """
+    # 2.3 钉钉推送配置
+    dingtalk_webhooks = os.getenv("CUSTOM_WEBHOOK_URLS", "").split(",")
+    dingtalk_enabled = len(dingtalk_webhooks) > 0 and dingtalk_webhooks[0].strip() != ""
+    if dingtalk_enabled:
+        print("✅ 钉钉推送配置成功")
     else:
-        # 生成所有股票的决策仪表盘
-        full_final_report = f"🎯 股票分析决策仪表盘\n共分析{len(stock_code_list)}只标的\n当前为A股春节休市期，行情数据为休市前最后一个交易日数据\n\n"
-        for stock_code in stock_code_list:
-            single_dashboard = generate_single_stock_dashboard(stock_code)
-            full_final_report += f"{single_dashboard}\n---\n"
+        print("⚠️  未配置钉钉推送，仅输出分析结果")
 
-        full_final_report += "\n📌 本报告数据均来自对应交易所官网、权威财经媒体公开信息，仅供参考，不构成任何投资建议。投资有风险，入市需谨慎。"
+    # 2.4 交易纪律参数
+    bias_threshold = float(os.getenv("BIAS_THRESHOLD", 5.0))
+    print(f"✅ 交易纪律参数加载完成，乖离率阈值：{bias_threshold}%")
 
-except Exception as e:
-    full_final_report = f"❌ 分析失败\n错误原因：{str(e)}\n\n排查建议：\n1. 确认股票代码格式正确（例：601777.SH）\n2. 核对DeepSeek、Tavily密钥是否正确，API额度是否充足"
+    # ===================== 3. 核心功能函数（开源系统核心能力）=====================
+    # 3.1 获取股票行情与技术面数据
+    def get_stock_data(stock_code):
+        """兼容A股/港股/美股，获取K线、均线、乖离率等核心数据"""
+        try:
+            # A股处理（格式：601777.SH/000001.SZ）
+            if ".SH" in stock_code or ".SZ" in stock_code:
+                code = stock_code.split(".")[0]
+                df = ak.stock_zh_a_hist(symbol=code, period="daily", start_date=(datetime.now()-timedelta(days=60)).strftime("%Y%m%d"), end_date=datetime.now().strftime("%Y%m%d"), adjust="qfq")
+                df = df.sort_values("日期", ascending=True).reset_index(drop=True)
+                current_price = df["收盘"].iloc[-1]
+                stock_name = ak.stock_individual_info_em(symbol=code).loc[ak.stock_individual_info_em(symbol=code)["item"]=="股票名称", "value"].values[0]
+            
+            # 港股处理（格式：hk00700）
+            elif stock_code.startswith("hk") or stock_code.startswith("HK"):
+                code = stock_code.replace("hk", "").replace("HK", "")
+                df = ak.stock_hk_hist(symbol=code, period="daily", start_date=(datetime.now()-timedelta(days=60)).strftime("%Y%m%d"), end_date=datetime.now().strftime("%Y%m%d"), adjust="qfq")
+                df = df.sort_values("日期", ascending=True).reset_index(drop=True)
+                current_price = df["收盘"].iloc[-1]
+                stock_name = f"港股{code}"
+            
+            # 美股处理（格式：AAPL/TSLA）
+            else:
+                ticker = yf.Ticker(stock_code)
+                df = ticker.history(period="60d", interval="1d")
+                df = df.reset_index()
+                df.columns = [col.lower() for col in df.columns]
+                current_price = df["close"].iloc[-1]
+                stock_name = ticker.info.get("shortName", stock_code)
 
-# 保存报告，100%兼容你之前的钉钉推送配置
-with open("result.txt", "w", encoding="utf-8") as f:
-    f.write(full_final_report)
+            # 计算核心技术指标
+            df["ma5"] = df["收盘" if "收盘" in df.columns else "close"].rolling(5).mean()
+            df["ma10"] = df["收盘" if "收盘" in df.columns else "close"].rolling(10).mean()
+            df["ma20"] = df["收盘" if "收盘" in df.columns else "close"].rolling(20).mean()
+            latest = df.iloc[-1]
+            
+            # 乖离率计算
+            bias = (current_price - latest["ma20"]) / latest["ma20"] * 100
+            # 多头排列判断
+            trend_up = latest["ma5"] > latest["ma10"] > latest["ma20"]
+            # 支撑压力位
+            support = latest["ma20"]
+            pressure = df["最高" if "最高" in df.columns else "high"].iloc[-10:].max()
 
-print("\n【最终报告生成完成】")
-print(full_final_report)
+            return {
+                "name": stock_name,
+                "code": stock_code,
+                "current_price": round(current_price, 2),
+                "ma5": round(latest["ma5"], 2),
+                "ma10": round(latest["ma10"], 2),
+                "ma20": round(latest["ma20"], 2),
+                "bias": round(bias, 2),
+                "trend_up": trend_up,
+                "support": round(support, 2),
+                "pressure": round(pressure, 2),
+                "change": round((current_price - df["收盘" if "收盘" in df.columns else "close"].iloc[-2])/df["收盘" if "收盘" in df.columns else "close"].iloc[-2]*100, 2)
+            }
+        except Exception as e:
+            print(f"❌ 获取{stock_code}数据失败：{e}")
+            return None
+
+    # 3.2 获取股票最新舆情新闻
+    def get_stock_news(stock_name, stock_code):
+        """用Tavily获取最新新闻，过滤过时信息"""
+        try:
+            search_query = f"{stock_name} {stock_code} 最新消息 业绩公告 行业新闻 2025-2026"
+            response = tavily_client.search(
+                query=search_query,
+                max_results=5,
+                days=news_max_days,
+                include_raw_content=False
+            )
+            news_list = [f"【{res['title']}】{res['content'][:200]}..." for res in response["results"]]
+            return "\n".join(news_list) if news_list else "暂无最新相关新闻"
+        except Exception as e:
+            print(f"⚠️  获取{stock_name}新闻失败：{e}")
+            return "新闻获取失败"
+
+    # 3.3 AI生成决策仪表盘（开源系统核心亮点）
+    def generate_ai_report(stock_data, news_content):
+        """生成包含核心结论、买卖点位、纪律检查、打分的完整报告"""
+        prompt = f"""
+        你是专业的股票分析师，严格按照以下格式生成【股票决策仪表盘】，语言简洁专业，数据精准。
+        股票基础信息：
+        名称：{stock_data['name']}
+        代码：{stock_data['code']}
+        当前价格：{stock_data['current_price']}元
+        涨跌幅：{stock_data['change']}%
+        技术面数据：
+        MA5：{stock_data['ma5']}元，MA10：{stock_data['ma10']}元，MA20：{stock_data['ma20']}元
+        20日乖离率：{stock_data['bias']}%，多头排列：{"是" if stock_data['trend_up'] else "否"}
+        支撑位：{stock_data['support']}元，压力位：{stock_data['pressure']}元
+        最新舆情新闻：
+        {news_content}
+        交易纪律规则：
+        1. 乖离率超过{bias_threshold}%，提示严禁追高风险
+        2. 多头排列为趋势向好信号
+        3. 必须给出精确的买入价、止损价、目标价
+        4. 每项检查项以「满足/注意/不满足」标记
+
+        严格按照以下固定格式输出，不要添加额外内容：
+        🎯 {stock_data['name']}({stock_data['code']}) 决策仪表盘
+        📊 综合评分：0-100分 | 操作建议：买入/观望/卖出 | 多空观点：看多/看空/震荡
+        💡 一句话核心结论：（不超过50字，直接给核心判断）
+
+        📈 精确买卖点位
+        - 建议买入价：xxx元
+        - 止损价：xxx元
+        - 第一目标价：xxx元
+        - 第二目标价：xxx元
+
+        ✅ 交易纪律检查清单
+        - 多头趋势排列：满足/注意/不满足
+        - 乖离率追高风险：满足/注意/不满足
+        - 基本面舆情支撑：满足/注意/不满足
+        - 盈亏比合理性：满足/注意/不满足
+
+        📰 舆情与基本面速览
+        利好催化：
+        1. xxx
+        2. xxx
+        风险警报：
+        1. xxx
+        2. xxx
+        """
+        try:
+            response = client.chat.completions.create(
+                model=ai_model,
+                messages=[{"role": "user", "content": prompt}],
+                temperature=0.3,
+                max_tokens=2000
+            )
+            return response.choices[0].message.content
+        except Exception as e:
+            print(f"❌ AI生成报告失败：{e}")
+            return f"❌ {stock_data['name']}分析失败，AI调用异常"
+
+    # 3.4 钉钉推送函数
+    def send_dingtalk(content):
+        """推送分析报告到钉钉"""
+        if not dingtalk_enabled:
+            return
+        for webhook in dingtalk_webhooks:
+            if not webhook.strip():
+                continue
+            try:
+                data = {
+                    "msgtype": "markdown",
+                    "markdown": {
+                        "title": "📈 股票智能分析报告",
+                        "text": content
+                    }
+                }
+                requests.post(webhook.strip(), json=data, timeout=10)
+                print(f"✅ 钉钉推送成功")
+            except Exception as e:
+                print(f"❌ 钉钉推送失败：{e}")
+
+    # ===================== 4. 主执行流程 =====================
+    print(f"\n🚀 开始执行股票分析，共{len(stock_list)}只股票")
+    full_report = f"# 🎯 股票智能分析系统报告\n📅 生成时间：{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n"
+    success_count = 0
+
+    for stock in stock_list:
+        print(f"\n===================== 正在分析：{stock} =====================")
+        # 1. 获取行情数据
+        stock_data = get_stock_data(stock)
+        if not stock_data:
+            full_report += f"## ❌ {stock} 分析失败，数据获取异常\n\n"
+            continue
+        # 2. 获取舆情新闻
+        news_content = get_stock_news(stock_data["name"], stock)
+        # 3. 生成AI分析报告
+        ai_report = generate_ai_report(stock_data, news_content)
+        print(ai_report)
+        # 4. 汇总报告
+        full_report += f"{ai_report}\n\n---\n\n"
+        success_count += 1
+
+    # 最终汇总
+    summary = f"## 📊 分析结果汇总\n共分析{len(stock_list)}只股票，成功{success_count}只，失败{len(stock_list)-success_count}只\n\n📌 股市有风险，投资需谨慎。"
+    full_report += summary
+    print(f"\n🎉 分析完成，{summary}")
+
+    # 推送钉钉
+    send_dingtalk(full_report)
+    print("✅ 全部流程执行完成")
