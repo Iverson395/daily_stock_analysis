@@ -8,9 +8,10 @@ on:
         required: false
         default: ""
         type: string
-  # 可选：定时自动运行（工作日每天18点自动分析STOCK_LIST里的股票，不需要直接删掉这段）
+  # 定时自动运行：工作日 北京时间9:00(开盘前)、18:00(收盘后) 自动推送
   schedule:
-    - cron: "0 10 * * 1-5"
+    - cron: "0 1 * * 1-5"  # 北京时间 周一至周五 9:00（UTC时间1:00）
+    - cron: "0 10 * * 1-5" # 北京时间 周一至周五 18:00（UTC时间10:00）
 
 jobs:
   daily-stock-analysis:
@@ -25,26 +26,25 @@ jobs:
           python-version: "3.10"
           cache: "pip"
 
-      - name: 安装全量依赖（兼容开源系统所有功能）
+      - name: 安装全量依赖（兼容所有功能）
         run: |
           python -m pip install --upgrade pip
           pip install pandas numpy akshare yfinance openai tavily-python requests python-dotenv
 
       - name: 执行股票分析核心脚本
         env:
-          # 1. 你已配置的DeepSeek（OpenAI兼容格式，必填）
+          # 1. DeepSeek AI配置
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
           OPENAI_BASE_URL: ${{ secrets.OPENAI_BASE_URL }}
           OPENAI_MODEL: ${{ secrets.OPENAI_MODEL }}
-          # 2. 钉钉推送配置
-        CUSTOM_WEBHOOK_URLS: ${{ secrets.CUSTOM_WEBHOOK_URLS }}
-        DINGTALK_SECRET: ${{ secrets.DINGTALK_SECRET }}
-          # 3. 你已配置的Tavily新闻搜索（必填）
+          # 2. Tavily新闻搜索配置
           TAVILY_API_KEYS: ${{ secrets.TAVILY_API_KEYS }}
-          # 4. 批量分析股票列表（必填，手动输代码时优先用手动输入的）
+          # 3. 钉钉推送配置
+          CUSTOM_WEBHOOK_URLS: ${{ secrets.CUSTOM_WEBHOOK_URLS }}
+          DINGTALK_SECRET: ${{ secrets.DINGTALK_SECRET }}
+          # 4. 股票列表配置
           STOCK_LIST: ${{ secrets.STOCK_LIST }}
-          # 5. 可选自定义配置（按需添加，和开源项目完全兼容）
+          # 5. 可选自定义参数
           NEWS_MAX_AGE_DAYS: ${{ secrets.NEWS_MAX_AGE_DAYS || '3' }}
           BIAS_THRESHOLD: ${{ secrets.BIAS_THRESHOLD || '5.0' }}
-        # 核心：把手动输入的股票代码传给py脚本，实现输代码就出分析
         run: python stock_analysis.py "${{ github.event.inputs.stock_code }}"
