@@ -201,26 +201,62 @@ if __name__ == "__main__":
             print(f"❌ AI生成报告失败：{e}")
             return f"❌ {stock_data['name']}分析失败，AI调用异常"
 
-    # 3.4 钉钉推送函数
-    def send_dingtalk(content):
-        """推送分析报告到钉钉"""
-        if not dingtalk_enabled:
-            return
-        for webhook in dingtalk_webhooks:
-            if not webhook.strip():
-                continue
-            try:
-                data = {
-                    "msgtype": "markdown",
-                    "markdown": {
-                        "title": "📈 股票智能分析报告",
-                        "text": content
-                    }
-                }
-                requests.post(webhook.strip(), json=data, timeout=10)
+    # 3.4 钉钉推送函数（支持加签，完美适配你的配置）
+def send_dingtalk(content):
+    """推送分析报告到钉钉，支持加签安全设置"""
+    # 读取配置
+    webhook_urls = os.getenv("CUSTOM_WEBHOOK_URLS", "").split(",")
+    dingtalk_secret = os.getenv("DINGTALK_SECRET", "")
+    dingtalk_enabled = len(webhook_urls) > 0 and webhook_urls[0].strip() != ""
+    
+    if not dingtalk_enabled:
+        print("⚠️  未配置钉钉推送，跳过推送步骤")
+        return
+    
+    # 加签逻辑（有SECRET时自动执行）
+    import time
+    import hmac
+    import hashlib
+    import base64
+    import urllib.parse
+    
+    timestamp = str(round(time.time() * 1000))
+    sign = ""
+    if dingtalk_secret.strip() != "":
+        secret_enc = dingtalk_secret.encode('utf-8')
+        string_to_sign = f"{timestamp}\n{dingtalk_secret}"
+        string_to_sign_enc = string_to_sign.encode('utf-8')
+        hmac_code = hmac.new(secret_enc, string_to_sign_enc, digestmod=hashlib.sha256).digest()
+        sign = urllib.parse.quote_plus(base64.b64encode(hmac_code))
+    
+    # 构造推送内容
+    data = {
+        "msgtype": "markdown",
+        "markdown": {
+            "title": "📈 股票智能分析报告",
+            "text": content
+        }
+    }
+    
+    # 执行推送
+    for webhook in webhook_urls:
+        webhook = webhook.strip()
+        if not webhook:
+            continue
+        # 加签时拼接签名和时间戳
+        if sign != "":
+            webhook = f"{webhook}&timestamp={timestamp}&sign={sign}"
+        try:
+            response = requests.post(webhook, json=data, timeout=10)
+            response_json = response.json()
+            if response_json.get("errcode") == 0:
                 print(f"✅ 钉钉推送成功")
-            except Exception as e:
-                print(f"❌ 钉钉推送失败：{e}")
+            else:
+                print(f"❌ 钉钉推送失败：{response_json.get('errmsg')}")
+        except Exception as e:
+            print(f"❌ 钉钉推送异常：{e}")1人未读5412:52        # 2. 钉钉推送配置
+        CUSTOM_WEBHOOK_URLS: ${{ secrets.CUSTOM_WEBHOOK_URLS }}
+        DINGTALK_SECRET: ${{ secrets.DINGTALK_SECRET }}
 
     # ===================== 4. 主执行流程 =====================
     print(f"\n🚀 开始执行股票分析，共{len(stock_list)}只股票")
