@@ -1,28 +1,35 @@
 name: 每日股票智能分析
 on:
-  # 定时任务：北京时间每个工作日18:00自动运行（和原项目一致）
   schedule:
-    - cron: '0 10 * * 1-5'
-  # 手动触发（支持手动输入股票代码）
+    - cron: '0 10 * * 1-5' # 北京时间工作日18:00自动运行
   workflow_dispatch:
     inputs:
       stock_code:
-        description: 手动输入股票代码，多个用逗号分隔，例：002244,600519（不填用STOCK_LIST固定配置）
+        description: 手动输入股票代码，多个用逗号分隔，例：002244,09992.HK
         required: false
         type: string
         default: ""
       force_run:
-        description: 强制运行（无视交易日，节假日也能跑）
+        description: 强制运行（无视交易日）
         required: false
         type: boolean
         default: false
+      market_type:
+        description: 市场类型
+        required: false
+        type: choice
+        options:
+          - cn
+          - hk
+          - us
+          - both
+        default: cn
       clear_cache:
-        description: 清除依赖缓存（运行失败时勾选）
+        description: 清除依赖缓存
         required: false
         type: boolean
         default: false
 
-# 全局锁定北京时间
 env:
   TZ: Asia/Shanghai
   PYTHONPATH: ${{ github.workspace }}
@@ -52,32 +59,25 @@ jobs:
           pip cache purge
           rm -rf ~/.cache/pip
 
-      - name: 安装Python依赖
+      - name: 安装Python依赖（升级最新稳定版）
         run: |
           python -m pip install --upgrade pip
-          pip install akshare>=1.13.0 yfinance>=0.2.40 pytz>=2023.3 requests>=2.31.0 openai>=1.0.0 google-generativeai>=0.8.0
+          pip install akshare>=1.16.0 yfinance>=0.2.40 pytz>=2023.3 requests>=2.31.0 openai>=1.0.0 google-generativeai>=0.8.0 --upgrade
 
       - name: 执行股票分析
         env:
-          # 你的AI模型配置
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
           OPENAI_BASE_URL: ${{ secrets.OPENAI_BASE_URL }}
           OPENAI_MODEL: ${{ secrets.OPENAI_MODEL }}
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
-          # 你的新闻搜索配置
           TAVILY_API_KEYS: ${{ secrets.TAVILY_API_KEYS }}
           SERPAPI_API_KEYS: ${{ secrets.SERPAPI_API_KEYS }}
-          # 你的钉钉推送配置（适配加签）
-          DINGTALK_WEBHOOK_URL: ${{ secrets.CUSTOM_WEBHOOK_URLS }}
+          CUSTOM_WEBHOOK_URLS: ${{ secrets.CUSTOM_WEBHOOK_URLS }}
           DINGTALK_SECRET: ${{ secrets.DINGTALK_SECRET }}
-          # 固定自选股配置
           STOCK_LIST: ${{ secrets.STOCK_LIST }}
-          # 可选配置（空值也不会报错）
           NEWS_MAX_AGE_DAYS: ${{ secrets.NEWS_MAX_AGE_DAYS }}
           BIAS_THRESHOLD: ${{ secrets.BIAS_THRESHOLD }}
           ANALYSIS_DELAY: ${{ secrets.ANALYSIS_DELAY }}
-          REPORT_SUMMARY_ONLY: ${{ secrets.REPORT_SUMMARY_ONLY }}
-          SINGLE_STOCK_NOTIFY: ${{ secrets.SINGLE_STOCK_NOTIFY }}
         run: |
           RUN_CMD="python stock_analysis.py"
           if [ -n "${{ github.event.inputs.stock_code }}" ]; then
@@ -86,5 +86,6 @@ jobs:
           if [ "${{ github.event.inputs.force_run }}" == "true" ]; then
             RUN_CMD="$RUN_CMD --force-run"
           fi
+          RUN_CMD="$RUN_CMD --market-type ${{ github.event.inputs.market_type }}"
           echo "执行命令：$RUN_CMD"
           $RUN_CMD
