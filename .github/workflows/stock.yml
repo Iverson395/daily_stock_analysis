@@ -1,128 +1,90 @@
-name: 股票智能分析系统（手动输入定制版）
+name: 每日股票智能分析
 on:
-  # 定时任务：北京时间每个工作日18:00自动运行（对应UTC时间10:00，对齐原项目）
+  # 定时任务：北京时间每个工作日18:00自动运行（和原项目一致）
   schedule:
     - cron: '0 10 * * 1-5'
-  # 手动触发（核心：支持手动输入股票代码，无需修改配置）
+  # 手动触发（支持手动输入股票代码）
   workflow_dispatch:
     inputs:
       stock_code:
-        description: 👉 手动输入股票代码，多个用逗号分隔，例：002244,600519,AAPL,hk00700（不填则使用STOCK_LIST固定配置）
+        description: 手动输入股票代码，多个用逗号分隔，例：002244,600519（不填用STOCK_LIST固定配置）
         required: false
         type: string
         default: ""
       force_run:
-        description: 强制运行（无视交易日判断，节假日/周末也能运行）
+        description: 强制运行（无视交易日，节假日也能跑）
         required: false
         type: boolean
         default: false
-      market_type:
-        description: 市场类型：cn(A股)/us(美股)/both(两者)
-        required: false
-        type: choice
-        options:
-          - cn
-          - us
-          - both
-        default: cn
       clear_cache:
         description: 清除依赖缓存（运行失败时勾选）
         required: false
         type: boolean
         default: false
 
-# 全局环境变量（锁定北京时间，彻底解决时差bug）
+# 全局锁定北京时间
 env:
   TZ: Asia/Shanghai
   PYTHONPATH: ${{ github.workspace }}
 
 jobs:
-  stock_analysis_job:
+  stock_analysis:
     name: 股票分析任务
     runs-on: ubuntu-latest
     steps:
-      # 步骤1：检出仓库代码
       - name: 检出仓库代码
         uses: actions/checkout@v4
 
-      # 步骤2：强制设置北京时间时区（彻底解决UTC时差导致的交易日误判）
-      - name: 锁定北京时间时区
+      - name: 强制设置北京时间时区
         run: |
           sudo timedatectl set-timezone Asia/Shanghai
-          echo "===== 系统时间校验 ====="
           echo "当前北京时间：$(date '+%Y-%m-%d %H:%M:%S')"
-          echo "当前系统日期：$(date '+%Y-%m-%d')"
-          echo "=========================="
 
-      # 步骤3：设置Python环境（对齐原项目python3.10+要求）
       - name: 设置Python 3.10环境
         uses: actions/setup-python@v5
         with:
           python-version: '3.10'
           cache: 'pip'
 
-      # 步骤4：清除缓存（运行失败时使用）
       - name: 清除依赖缓存
         if: ${{ github.event.inputs.clear_cache == 'true' }}
         run: |
           pip cache purge
           rm -rf ~/.cache/pip
 
-      # 步骤5：安装项目依赖（全量兼容原项目）
       - name: 安装Python依赖
         run: |
           python -m pip install --upgrade pip
-          pip install akshare>=1.13.0 yfinance>=0.2.40 pytz>=2023.3 requests>=2.31.0 openai>=1.0.0 google-generativeai>=0.8.0 anthropic>=0.30.0 python-dotenv>=1.0.0
+          pip install akshare>=1.13.0 yfinance>=0.2.40 pytz>=2023.3 requests>=2.31.0 openai>=1.0.0 google-generativeai>=0.8.0
 
-      # 步骤6：执行股票分析核心脚本（核心：把手动输入的股票代码传给脚本）
       - name: 执行股票分析
         env:
-          # ---------------------- 你已配置的DeepSeek（OpenAI兼容）----------------------
+          # 你的AI模型配置
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
           OPENAI_BASE_URL: ${{ secrets.OPENAI_BASE_URL }}
           OPENAI_MODEL: ${{ secrets.OPENAI_MODEL }}
-          # ---------------------- 你已配置的Tavily新闻搜索 ----------------------
-          TAVILY_API_KEY: ${{ secrets.TAVILY_API_KEY }}
-          TAVILY_API_KEYS: ${{ secrets.TAVILY_API_KEYS }}
-          # ---------------------- 你已配置的钉钉推送 ----------------------
-          DINGTALK_WEBHOOK_URL: ${{ secrets.DINGTALK_WEBHOOK_URL }}
-          CUSTOM_WEBHOOK_URLS: ${{ secrets.CUSTOM_WEBHOOK_URLS }}
-          # ---------------------- 兼容原项目全量Secrets配置（无需修改）----------------------
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
-          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
-          ANTHROPIC_MODEL: ${{ secrets.ANTHROPIC_MODEL }}
-          SERPAPI_API_KEY: ${{ secrets.SERPAPI_API_KEY }}
+          # 你的新闻搜索配置
+          TAVILY_API_KEYS: ${{ secrets.TAVILY_API_KEYS }}
           SERPAPI_API_KEYS: ${{ secrets.SERPAPI_API_KEYS }}
-          BOCHA_API_KEYS: ${{ secrets.BOCHA_API_KEYS }}
-          BRAVE_API_KEYS: ${{ secrets.BRAVE_API_KEYS }}
-          WECHAT_WEBHOOK_URL: ${{ secrets.WECHAT_WEBHOOK_URL }}
-          FEISHU_WEBHOOK_URL: ${{ secrets.FEISHU_WEBHOOK_URL }}
-          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
-          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-          EMAIL_SENDER: ${{ secrets.EMAIL_SENDER }}
-          EMAIL_PASSWORD: ${{ secrets.EMAIL_PASSWORD }}
-          EMAIL_RECEIVERS: ${{ secrets.EMAIL_RECEIVERS }}
-          # ---------------------- 原项目自定义配置（可选）----------------------
+          # 你的钉钉推送配置（适配加签）
+          DINGTALK_WEBHOOK_URL: ${{ secrets.CUSTOM_WEBHOOK_URLS }}
+          DINGTALK_SECRET: ${{ secrets.DINGTALK_SECRET }}
+          # 固定自选股配置
           STOCK_LIST: ${{ secrets.STOCK_LIST }}
+          # 可选配置（空值也不会报错）
           NEWS_MAX_AGE_DAYS: ${{ secrets.NEWS_MAX_AGE_DAYS }}
           BIAS_THRESHOLD: ${{ secrets.BIAS_THRESHOLD }}
-          REPORT_TYPE: ${{ secrets.REPORT_TYPE }}
+          ANALYSIS_DELAY: ${{ secrets.ANALYSIS_DELAY }}
           REPORT_SUMMARY_ONLY: ${{ secrets.REPORT_SUMMARY_ONLY }}
           SINGLE_STOCK_NOTIFY: ${{ secrets.SINGLE_STOCK_NOTIFY }}
-          ANALYSIS_DELAY: ${{ secrets.ANALYSIS_DELAY }}
         run: |
-          # 构建运行命令
           RUN_CMD="python stock_analysis.py"
-          # 添加手动输入的股票代码
           if [ -n "${{ github.event.inputs.stock_code }}" ]; then
             RUN_CMD="$RUN_CMD --stock-code ${{ github.event.inputs.stock_code }}"
           fi
-          # 添加强制运行参数
           if [ "${{ github.event.inputs.force_run }}" == "true" ]; then
             RUN_CMD="$RUN_CMD --force-run"
           fi
-          # 添加市场类型参数
-          RUN_CMD="$RUN_CMD --market-type ${{ github.event.inputs.market_type }}"
-          # 执行命令
           echo "执行命令：$RUN_CMD"
           $RUN_CMD
