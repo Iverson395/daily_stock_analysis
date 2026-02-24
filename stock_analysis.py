@@ -15,12 +15,12 @@ from typing import List, Dict, Optional
 
 # ===================== 1. 命令行参数解析（空值全容错）=====================
 parser = argparse.ArgumentParser(description="daily_stock_analysis 股票智能分析系统")
-parser.add_argument("--stock-code", type=str, default="", help="手动输入股票代码，多个用逗号分隔，例：002244,600519")
+parser.add_argument("--stock-code", type=str, default="", help="手动输入股票代码，支持A股/港股/美股，例：002244,09992.HK,AAPL")
 parser.add_argument("--force-run", action="store_true", help="强制运行，无视交易日判断")
-parser.add_argument("--market-type", type=str, default="cn", help="市场类型：cn(A股)/us(美股)/both")
+parser.add_argument("--market-type", type=str, default="cn", help="市场类型：cn(A股)/hk(港股)/us(美股)/both(全部)")
 args = parser.parse_args()
 
-# ===================== 2. 全局配置（100%适配你的Secrets，全量空值容错）=====================
+# ===================== 2. 全局配置（100%无语法错误+全量空值容错）=====================
 # 强制锁定北京时间，彻底解决时差问题
 BEIJING_TZ = pytz.timezone("Asia/Shanghai")
 os.environ["TZ"] = "Asia/Shanghai"
@@ -37,16 +37,16 @@ GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "").strip()
 # AI优先级：Gemini > OpenAI(DeepSeek)，和原项目完全一致
 AI_PRIORITY = ["gemini", "openai"] if GEMINI_API_KEY else ["openai", "gemini"]
 
-# ---------------------- 股票配置（空值过滤，彻底避免无效数据）----------------------
+# ---------------------- 股票配置（兼容港股代码，空值彻底过滤）----------------------
 INPUT_STOCK_LIST = args.stock_code.strip().split(",") if args.stock_code.strip() else []
 ENV_STOCK_LIST = os.getenv("STOCK_LIST", "").strip().split(",") if os.getenv("STOCK_LIST", "").strip() else []
 STOCK_LIST = INPUT_STOCK_LIST if INPUT_STOCK_LIST else ENV_STOCK_LIST
 STOCK_LIST = [code.strip() for code in STOCK_LIST if code.strip()]  # 彻底过滤空代码
 
-# ---------------------- 新闻搜索配置（适配你的TAVILY_API_KEYS，和原项目一致）----------------------
+# ---------------------- 新闻搜索配置（适配你的TAVILY_API_KEYS）----------------------
 TAVILY_API_KEY = os.getenv("TAVILY_API_KEY", os.getenv("TAVILY_API_KEYS", "")).strip()
 SERPAPI_API_KEY = os.getenv("SERPAPI_API_KEY", os.getenv("SERPAPI_API_KEYS", "")).strip()
-# 核心修复：空值兜底，绝对不会出现int('')报错
+# 核心修复：空值兜底，彻底杜绝类型转换报错
 NEWS_MAX_AGE_DAYS = int(os.getenv("NEWS_MAX_AGE_DAYS", "").strip() or "3")
 
 # ---------------------- 钉钉推送配置（完整适配你的加签SECRET）----------------------
@@ -56,19 +56,19 @@ DINGTALK_SECRET = os.getenv("DINGTALK_SECRET", "").strip()
 WECHAT_WEBHOOK_URL = os.getenv("WECHAT_WEBHOOK_URL", "").strip()
 FEISHU_WEBHOOK_URL = os.getenv("FEISHU_WEBHOOK_URL", "").strip()
 
-# ---------------------- 交易纪律配置（核心修复：全量空值兜底，彻底杜绝类型转换报错）----------------------
+# ---------------------- 交易纪律配置（修复语法错误+全量空值兜底）----------------------
 BIAS_THRESHOLD = float(os.getenv("BIAS_THRESHOLD", "").strip() or "5.0")
 DEFAULT_MA_CONFIG = [5, 10, 20, 60]
 REPORT_TYPE = os.getenv("REPORT_TYPE", "full").strip().lower()
 REPORT_SUMMARY_ONLY = os.getenv("REPORT_SUMMARY_ONLY", "false").strip().lower() == "true"
 SINGLE_STOCK_NOTIFY = os.getenv("SINGLE_STOCK_NOTIFY", "false").strip().lower() == "true"
-ANALYSIS_DELAY = i nt(os.getenv("ANALYSIS_DELAY", "").strip() or "3")
+ANALYSIS_DELAY = int(os. getenv("ANALYSIS_DELAY", "").strip() or "3")  # 已修复语法错误
 
 # 全局缓存
 TRADE_CAL_CACHE: Optional[List[str]] = None
 STOCK_NAME_CACHE: Dict[str, str] = {}
 
-# ===================== 3. 核心工具函数（全量空值+类型容错）=====================
+# ===================== 3. 核心工具函数（修复语法+港股兼容+全量容错）=====================
 def get_now() -> datetime:
     return datetime.now(BEIJING_TZ)
 
@@ -86,6 +86,7 @@ def dingtalk_sign(secret: str) -> Dict:
     return {"timestamp": timestamp, "sign": sign}
 
 def is_trade_day(market: str = "cn") -> bool:
+    """交易日判断，支持A股/港股/美股"""
     global TRADE_CAL_CACHE
     today = get_today_str()
     now = get_now()
@@ -95,7 +96,37 @@ def is_trade_day(market: str = "cn") -> bool:
         print("[系统日志] 已开启强制运行，无视交易日判断")
         return True
 
-    # A股交易日判断（优先官方数据源）
+    # 港股交易日判断
+    if market == "hk":
+        weekday = now.weekday()
+        if weekday >= 5:
+            print("[系统日志] 港股今日周末，非交易日")
+            return False
+        # 港股2026年休市日（简化兜底）
+        hk_holiday_2026 = [
+            "2026-01-01", "2026-01-29", "2026-02-17", "2026-03-30", "2026-04-04",
+            "2026-04-07", "2026-05-01", "2026-05-28", "2026-06-30", "2026-07-01",
+            "2026-09-28", "2026-10-01", "2026-10-02", "2026-12-25", "2026-12-26"
+        ]
+        is_trade = today not in hk_holiday_2026
+        print(f"[系统日志] 港股交易日校验：今日{'是' if is_trade else '不是'}交易日")
+        return is_trade
+
+    # 美股交易日判断
+    if market == "us":
+        weekday = now.weekday()
+        if weekday >= 5:
+            print("[系统日志] 美股今日周末，非交易日")
+            return False
+        us_holiday_2026 = [
+            "2026-01-01", "2026-01-19", "2026-02-16", "2026-04-03", "2026-05-25",
+            "2026-06-19", "2026-07-03", "2026-09-07", "2026-11-26", "2026-12-25"
+        ]
+        is_trade = today not in us_holiday_2026
+        print(f"[系统日志] 美股交易日校验：今日{'是' if is_trade else '不是'}交易日")
+        return is_trade
+
+    # A股交易日判断（默认，优先官方数据源）
     try:
         if TRADE_CAL_CACHE is None:
             trade_cal_df = ak.tool_trade_date_hist_sina()
@@ -122,40 +153,81 @@ def is_trade_day(market: str = "cn") -> bool:
         return is_trade
 
 def get_stock_data(stock_code: str) -> Dict:
-    code = stock_code.strip().lower().replace("sz", "").replace("sh", "")
-    try:
-        # 股票名称获取
-        if code not in STOCK_NAME_CACHE:
-            name_df = ak.stock_info_a_code_name()
-            STOCK_NAME_CACHE = dict(zip(name_df["code"], name_df["name"]))
-        stock_name = STOCK_NAME_CACHE.get(code, code)
+    """全市场股票数据获取，兼容A股/港股/美股，支持09992.HK格式"""
+    raw_code = stock_code.strip()
+    code = raw_code.lower().replace(".hk", "").replace("sz", "").replace("sh", "").replace("hk", "")
+    # 自动识别市场
+    market = "cn"
+    if raw_code.lower().endswith(".hk") or raw_code.lower().startswith("hk"):
+        market = "hk"
+    elif raw_code.isalpha() or raw_code.lower().startswith("us"):
+        market = "us"
 
-        # K线数据获取（前复权）
-        end_date = get_now().strftime("%Y%m%d")
-        start_date = (get_now() - timedelta(days=120)).strftime("%Y%m%d")
-        kline_df = ak.stock_zh_a_hist(symbol=code, period="daily", start_date=start_date, end_date=end_date, adjust="qfq")
+    try:
+        stock_name = code
+        # 1. 港股数据获取
+        if market == "hk":
+            stock_name = ak.stock_hk_name_from_code_em(code=code)
+            end_date = get_now().strftime("%Y%m%d")
+            start_date = (get_now() - timedelta(days=120)).strftime("%Y%m%d")
+            # 港股K线数据（前复权）
+            kline_df = ak.stock_hk_hist(symbol=code, period="daily", start_date=start_date, end_date=end_date, adjust="qfq")
+            # 港股实时行情
+            spot_df = ak.stock_hk_spot_em()
+            spot_info = spot_df[spot_df["代码"] == code].iloc[0].to_dict() if len(spot_df[spot_df["代码"] == code]) > 0 else {}
+            chip_concentration = 0  # 港股无公开筹码集中度数据
+
+        # 2. A股数据获取
+        elif market == "cn":
+            if code not in STOCK_NAME_CACHE:
+                name_df = ak.stock_info_a_code_name()
+                STOCK_NAME_CACHE = dict(zip(name_df["code"], name_df["name"]))
+            stock_name = STOCK_NAME_CACHE.get(code, code)
+            end_date = get_now().strftime("%Y%m%d")
+            start_date = (get_now() - timedelta(days=120)).strftime("%Y%m%d")
+            # A股K线数据
+            kline_df = ak.stock_zh_a_hist(symbol=code, period="daily", start_date=start_date, end_date=end_date, adjust="qfq")
+            # A股实时行情
+            spot_df = ak.stock_zh_a_spot_em()
+            spot_info = spot_df[spot_df["代码"] == code].iloc[0].to_dict() if len(spot_df[spot_df["代码"] == code]) > 0 else {}
+            # A股筹码分布
+            try:
+                chip_df = ak.stock_chip_distribution_em(symbol=code, date=end_date)
+                chip_concentration = chip_df["筹码集中度90"].iloc[0] if len(chip_df) > 0 else 0
+            except:
+                chip_concentration = 0
+
+        # 3. 美股数据获取
+        elif market == "us":
+            ticker = yf.Ticker(code.upper())
+            stock_name = ticker.info.get("shortName", code)
+            kline_df = ticker.history(period="4mo", interval="1d").reset_index()
+            kline_df.rename(columns={
+                "Date": "日期", "Open": "开盘", "High": "最高", "Low": "最低",
+                "Close": "收盘", "Volume": "成交量", "Adj Close": "收盘"
+            }, inplace=True)
+            # 美股实时行情
+            spot_info = {
+                "涨跌幅": ((kline_df["收盘"].iloc[-1] - kline_df["收盘"].iloc[-2]) / kline_df["收盘"].iloc[-2] * 100) if len(kline_df)>=2 else 0,
+                "成交量": kline_df["成交量"].iloc[-1],
+                "成交额": kline_df["收盘"].iloc[-1] * kline_df["成交量"].iloc[-1]
+            }
+            chip_concentration = 0
+
+        # 数据校验与技术指标计算
         kline_df = kline_df.sort_values("日期", ascending=True).reset_index(drop=True)
         if len(kline_df) < 60:
             raise Exception(f"K线数据不足，仅获取到{len(kline_df)}条")
 
-        # 实时行情补充
-        spot_df = ak.stock_zh_a_spot_em()
-        spot_info = spot_df[spot_df["代码"] == code].iloc[0].to_dict() if len(spot_df[spot_df["代码"] == code]) > 0 else {}
-
-        # 筹码分布
-        try:
-            chip_df = ak.stock_chip_distribution_em(symbol=code, date=end_date)
-            chip_concentration = chip_df["筹码集中度90"].iloc[0] if len(chip_df) > 0 else 0
-        except:
-            chip_concentration = 0
-
-        # 技术指标计算（全量类型容错）
         latest = kline_df.iloc[-1]
         ma_list = {}
         for ma in DEFAULT_MA_CONFIG:
             ma_list[f"ma{ma}"] = kline_df["收盘"].rolling(ma).mean().iloc[-1]
+        # 乖离率计算
         bias = (latest["收盘"] - ma_list["ma20"]) / ma_list["ma20"] * 100
+        # 多头排列判断
         is_long_trend = ma_list["ma5"] > ma_list["ma10"] > ma_list["ma20"]
+        # 强势趋势股自动放宽乖离率阈值（对齐原项目规则）
         current_bias_threshold = BIAS_THRESHOLD * 1.6 if is_long_trend else BIAS_THRESHOLD
 
         # 类型安全转换，彻底避免报错
@@ -165,7 +237,8 @@ def get_stock_data(stock_code: str) -> Dict:
         return {
             "code": code,
             "name": stock_name,
-            "full_code": stock_code,
+            "market": market,
+            "full_code": raw_code,
             "latest_price": round(latest["收盘"], 2),
             "today_change": today_change,
             "today_volume": spot_info.get("成交量", latest["成交量"]),
@@ -180,14 +253,16 @@ def get_stock_data(stock_code: str) -> Dict:
             "chip_concentration": round(chip_concentration, 2),
         }
     except Exception as e:
-        print(f"[股票数据错误] {stock_code} 数据获取失败：{str(e)}")
+        print(f"[股票数据错误] {raw_code} 数据获取失败：{str(e)}")
         return {}
 
-def get_stock_news(stock_code: str, stock_name: str) -> List[Dict]:
+def get_stock_news(stock_code: str, stock_name: str, market: str = "cn") -> List[Dict]:
+    """股票新闻舆情获取，适配不同市场"""
     news_list = []
     end_date = get_now()
     start_date = end_date - timedelta(days=NEWS_MAX_AGE_DAYS)
-    query = f"{stock_name} {stock_code} 最新消息 业绩公告 研报 行业政策 {start_date.strftime('%Y-%m-%d')} 至 {end_date.strftime('%Y-%m-%d')}"
+    market_name = "港股" if market == "hk" else "美股" if market == "us" else "A股"
+    query = f"{stock_name} {stock_code} {market_name} 最新消息 业绩公告 研报 行业政策 {start_date.strftime('%Y-%m-%d')} 至 {end_date.strftime('%Y-%m-%d')}"
 
     try:
         # 优先Tavily（适配你的TAVILY_API_KEYS）
@@ -231,40 +306,64 @@ def get_stock_news(stock_code: str, stock_name: str) -> List[Dict]:
         print(f"[新闻获取警告] {stock_name} 新闻拉取失败：{str(e)}")
     return news_list[:8]
 
-def get_market_review() -> str:
+def get_market_review(market: str = "cn") -> str:
+    """大盘复盘功能，支持A股/港股/美股"""
     today = get_today_str()
     review_content = f"🎯 {today} 大盘复盘\n\n"
     try:
-        # A股核心指数
-        index_df = ak.stock_zh_index_spot()
-        szzs = index_df[index_df["代码"] == "sh000001"].iloc[0].to_dict() if len(index_df[index_df["代码"] == "sh000001"]) > 0 else {}
-        szcz = index_df[index_df["代码"] == "sz399001"].iloc[0].to_dict() if len(index_df[index_df["代码"] == "sz399001"]) > 0 else {}
-        cybz = index_df[index_df["代码"] == "sz399006"].iloc[0].to_dict() if len(index_df[index_df["代码"] == "sz399006"]) > 0 else {}
+        # A股大盘数据
+        if market in ["cn", "both"]:
+            index_df = ak.stock_zh_index_spot()
+            szzs = index_df[index_df["代码"] == "sh000001"].iloc[0].to_dict() if len(index_df[index_df["代码"] == "sh000001"]) > 0 else {}
+            szcz = index_df[index_df["代码"] == "sz399001"].iloc[0].to_dict() if len(index_df[index_df["代码"] == "sz399001"]) > 0 else {}
+            cybz = index_df[index_df["代码"] == "sz399006"].iloc[0].to_dict() if len(index_df[index_df["代码"] == "sz399006"]) > 0 else {}
 
-        review_content += "📊 A股主要指数\n"
-        if szzs:
-            change = round(float(szzs['涨跌幅']), 2)
-            review_content += f"- 上证指数: {szzs['最新价']} (🟢+{change}% 🔴{change}%)\n".replace("+ -", "-")
-        if szcz:
-            change = round(float(szcz['涨跌幅']), 2)
-            review_content += f"- 深证成指: {szcz['最新价']} (🟢+{change}% 🔴{change}%)\n".replace("+ -", "-")
-        if cybz:
-            change = round(float(cybz['涨跌幅']), 2)
-            review_content += f"- 创业板指: {cybz['最新价']} (🟢+{change}% 🔴{change}%)\n".replace("+ -", "-")
+            review_content += "📊 A股主要指数\n"
+            if szzs:
+                change = round(float(szzs['涨跌幅']), 2)
+                review_content += f"- 上证指数: {szzs['最新价']} (🟢+{change}% 🔴{change}%)\n".replace("+ -", "-")
+            if szcz:
+                change = round(float(szcz['涨跌幅']), 2)
+                review_content += f"- 深证成指: {szcz['最新价']} (🟢+{change}% 🔴{change}%)\n".replace("+ -", "-")
+            if cybz:
+                change = round(float(cybz['涨跌幅']), 2)
+                review_content += f"- 创业板指: {cybz['最新价']} (🟢+{change}% 🔴{change}%)\n".replace("+ -", "-")
 
-        # 市场涨跌概况
-        market_df = ak.stock_zh_a_market_deal_em()
-        up_count = market_df["上涨家数"].iloc[0] if len(market_df) > 0 else 0
-        down_count = market_df["下跌家数"].iloc[0] if len(market_df) > 0 else 0
-        limit_up_count = market_df["涨停家数"].iloc[0] if len(market_df) > 0 else 0
-        limit_down_count = market_df["跌停家数"].iloc[0] if len(market_df) > 0 else 0
-        review_content += f"\n📈 市场概况\n上涨: {up_count} | 下跌: {down_count} | 涨停: {limit_up_count} | 跌停: {limit_down_count}\n"
+            # A股市场涨跌概况
+            market_df = ak.stock_zh_a_market_deal_em()
+            up_count = market_df["上涨家数"].iloc[0] if len(market_df) > 0 else 0
+            down_count = market_df["下跌家数"].iloc[0] if len(market_df) > 0 else 0
+            limit_up_count = market_df["涨停家数"].iloc[0] if len(market_df) > 0 else 0
+            limit_down_count = market_df["跌停家数"].iloc[0] if len(market_df) > 0 else 0
+            review_content += f"\n📈 市场概况\n上涨: {up_count} | 下跌: {down_count} | 涨停: {limit_up_count} | 跌停: {limit_down_count}\n"
 
-        # 板块涨跌
-        board_up_df = ak.stock_board_concept_name_em()
-        top_board = board_up_df.head(3)["板块名称"].tolist()
-        bottom_board = board_up_df.tail(3)["板块名称"].tolist()
-        review_content += f"\n🔥 板块表现\n领涨: {','.join(top_board)}\n领跌: {','.join(bottom_board)}\n"
+            # A股板块涨跌
+            board_up_df = ak.stock_board_concept_name_em()
+            top_board = board_up_df.head(3)["板块名称"].tolist()
+            bottom_board = board_up_df.tail(3)["板块名称"].tolist()
+            review_content += f"\n🔥 板块表现\n领涨: {','.join(top_board)}\n领跌: {','.join(bottom_board)}\n"
+
+        # 港股大盘数据
+        if market in ["hk", "both"]:
+            hk_index_df = ak.stock_hk_index_spot_em()
+            hsi = hk_index_df[hk_index_df["代码"] == "HSI"].iloc[0].to_dict() if len(hk_index_df[hk_index_df["代码"] == "HSI"]) > 0 else {}
+            review_content += "\n📊 港股主要指数\n"
+            if hsi:
+                change = round(float(hsi['涨跌幅']), 2)
+                review_content += f"- 恒生指数: {hsi['最新价']} (🟢+{change}% 🔴{change}%)\n".replace("+ -", "-")
+
+        # 美股大盘数据
+        if market in ["us", "both"]:
+            spx = yf.Ticker("^GSPC").history(period="1d").iloc[-1]
+            dji = yf.Ticker("^DJI").history(period="1d").iloc[-1]
+            ixic = yf.Ticker("^IXIC").history(period="1d").iloc[-1]
+            review_content += "\n📊 美股主要指数\n"
+            spx_change = round((spx['Close']-spx['Open'])/spx['Open']*100, 2)
+            review_content += f"- 标普500(SPX): {round(spx['Close'],2)} (🟢+{spx_change}% 🔴{spx_change}%)\n".replace("+ -", "-")
+            dji_change = round((dji['Close']-dji['Open'])/dji['Open']*100, 2)
+            review_content += f"- 道琼斯(DJI): {round(dji['Close'],2)} (🟢+{dji_change}% 🔴{dji_change}%)\n".replace("+ -", "-")
+            ixic_change = round((ixic['Close']-ixic['Open'])/ixic['Open']*100, 2)
+            review_content += f"- 纳斯达克(IXIC): {round(ixic['Close'],2)} (🟢+{ixic_change}% 🔴{ixic_change}%)\n".replace("+ -", "-")
     except Exception as e:
         print(f"[大盘复盘警告] 数据获取失败：{str(e)}")
         review_content += "⚠️ 大盘数据获取失败，请稍后重试\n"
@@ -277,9 +376,10 @@ def generate_ai_report(stock_info: Dict, news_list: List[Dict]) -> str:
         return ""
     stock_code = stock_info["full_code"]
     stock_name = stock_info["name"]
+    market_name = "港股" if stock_info["market"] == "hk" else "美股" if stock_info["market"] == "us" else "A股"
 
     prompt = f"""
-你是专业的A股股票分析助手，严格按照以下固定格式和交易规则，生成{stock_name}({stock_code})的决策仪表盘报告，禁止偏离格式，禁止编造数据，所有内容必须基于我提供的真实数据。
+你是专业的{market_name}股票分析助手，严格按照以下固定格式和交易规则，生成{stock_name}({stock_code})的决策仪表盘报告，禁止偏离格式，禁止编造数据，所有内容必须基于我提供的真实数据。
 
 ===== 固定格式要求（必须100%遵守）=====
 1. 个股报告开头必须包含【股票名称+代码】，然后按顺序生成以下模块：
@@ -289,7 +389,7 @@ def generate_ai_report(stock_info: Dict, news_list: List[Dict]) -> str:
    - 📊 技术面与筹码分布分析
    - 🎯 精确操作点位（买入区间、止损价、2档目标价，必须明确）
    - 📋 交易纪律检查清单（固定5项，每项标注✅满足/⚠️注意/❌不满足，附核验说明）
-2. 语言简洁专业，符合A股投资语境，禁止冗余内容
+2. 语言简洁专业，符合{market_name}投资语境，禁止冗余内容
 
 ===== 固定交易规则（必须100%遵守）=====
 - 严禁追高：乖离率超过{stock_info['bias_threshold']}%，标记为不满足
@@ -302,6 +402,7 @@ def generate_ai_report(stock_info: Dict, news_list: List[Dict]) -> str:
 【股票基础信息】
 股票名称：{stock_name}
 股票代码：{stock_code}
+市场类型：{market_name}
 最新收盘价：{stock_info['latest_price']}元
 当日涨跌幅：{stock_info['today_change']}%
 当日成交额：{stock_info['today_amount']}万元
@@ -454,7 +555,7 @@ if __name__ == "__main__":
     analysis_failed = 0
 
     # 生成大盘复盘
-    market_review = get_market_review()
+    market_review = get_market_review(market=args.market_type)
     print(f"[系统日志] 大盘复盘生成完成")
 
     # 批量分析股票
@@ -471,7 +572,7 @@ if __name__ == "__main__":
             analysis_failed += 1
             continue
         # 获取新闻
-        news_list = get_stock_news(stock_code, stock_info["name"])
+        news_list = get_stock_news(stock_code, stock_info["name"], market=stock_info["market"])
         # 生成报告
         single_report = generate_ai_report(stock_info, news_list)
         if not single_report:
