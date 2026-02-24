@@ -1,135 +1,91 @@
-# 股票分析配置文件（与 daily_stock_analysis 原项目框架100%兼容）
-# 所有参数均可按需修改，无需改动py代码
+name: 每日股票智能分析
+on:
+  schedule:
+    - cron: '0 10 * * 1-5' # 北京时间工作日18:00自动运行
+  workflow_dispatch:
+    inputs:
+      stock_code:
+        description: 手动输入股票代码，多个用逗号分隔，例：002244,09992.HK
+        required: false
+        type: string
+        default: ""
+      force_run:
+        description: 强制运行（无视交易日）
+        required: false
+        type: boolean
+        default: false
+      market_type:
+        description: 市场类型
+        required: false
+        type: choice
+        options:
+          - cn
+          - hk
+          - us
+          - both
+        default: cn
+      clear_cache:
+        description: 清除依赖缓存
+        required: false
+        type: boolean
+        default: false
 
-# 基础配置
-base:
-  # 支持的市场：cn(A股)、hk(港股)、us(美股)，自动识别无需手动修改
-  supported_markets: ["cn", "hk", "us"]
-  # 日线数据获取周期（天）：用于计算均线、技术指标，默认60天
-  kline_days: 60
-  # 分析结果默认保存路径：为空则不保存本地文件
-  report_save_path: "./analysis_reports"
-  # 是否打印详细日志
-  debug: true
+env:
+  TZ: Asia/Shanghai
+  PYTHONPATH: ${{ github.workspace }}
 
-# 技术分析配置（与原项目内置交易纪律完全对齐）
-technical:
-  # 均线周期配置
-  ma_periods:
-    short: 5    # MA5
-    mid: 10     # MA10
-    long: 20    # MA20
-  # 乖离率阈值（%）：超过该值提示追高风险，与原项目一致
-  bias_threshold: 5.0
-  # 强势股乖离率放宽阈值（%）：多头排列时自动放宽
-  strong_bias_threshold: 8.0
-  # 成交量参考周期（天）：用于判断量能变化
-  volume_period: 5
+jobs:
+  stock_analysis:
+    name: 股票分析任务
+    runs-on: ubuntu-latest
+    steps:
+      - name: 检出仓库代码
+        uses: actions/checkout@v4
 
-# 舆情新闻配置（与原项目Tavily搜索对齐）
-news:
-  # 新闻最大时效（天）：默认3天，避免过时信息
-  max_age_days: 3
-  # 单只股票搜索新闻数量上限
-  news_limit: 10
-  # 搜索语言：zh(中文)、en(英文)，美股自动切换en
-  search_lang: "zh"
-  # 搜索关键词模板：{stock_name} 会自动替换为股票名称，{code}替换为代码
-  search_template: "{stock_name} {code} 最新消息 公告 业绩 行业新闻 2026"
+      - name: 强制设置北京时间时区
+        run: |
+          sudo timedatectl set-timezone Asia/Shanghai
+          echo "当前北京时间：$(date '+%Y-%m-%d %H:%M:%S')"
 
-# AI模型配置（DeepSeek，OpenAI兼容格式，与原项目完全对齐）
-ai:
-  # 模型名称：DeepSeek推荐用 deepseek-chat 或 deepseek-v3
-  model_name: "deepseek-chat"
-  # 模型温度：0-1，越低越严谨，越高越发散，股票分析推荐0.3-0.5
-  temperature: 0.4
-  # 最大输出token数
-  max_tokens: 4000
-  # 超时时间（秒）
-  timeout: 120
-  # 分析Prompt模板（与原项目决策仪表盘格式完全一致）
-  prompt_template: |
-    你是一名专业的股票分析师，严格遵循以下交易纪律和分析框架，对给定的股票进行全面分析，输出格式必须严格按照示例，不得随意修改结构。
+      - name: 设置Python 3.10环境
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+          cache: 'pip'
 
-    【交易纪律】
-    1. 严禁追高：乖离率超过{bias_threshold}%自动提示风险，多头排列强势股可放宽至{strong_bias_threshold}%
-    2. 趋势判断：MA5 > MA10 > MA20 为多头排列，看多；MA5 < MA10 < MA20 为空头排列，看空
-    3. 必须给出精确的买入价、止损价、目标价
-    4. 每项检查条件必须以「满足 / 注意 / 不满足」标记
-    5. 仅使用{max_age_days}天内的新闻信息，不得使用过时数据
+      - name: 清除依赖缓存
+        if: ${{ github.event.inputs.clear_cache == 'true' }}
+        run: |
+          pip cache purge
+          rm -rf ~/.cache/pip
 
-    【股票基础信息】
-    股票名称：{stock_name}
-    股票代码：{stock_code}
-    所属市场：{market}
-    当前价格：{current_price} 元
-    最新交易日：{trade_date}
+      - name: 安装Python依赖（升级最新稳定版）
+        run: |
+          python -m pip install --upgrade pip
+          pip install akshare>=1.16.0 yfinance>=0.2.40 pytz>=2023.3 requests>=2.31.0 openai>=1.0.0 google-generativeai>=0.8.0 --upgrade
 
-    【技术面数据】
-    均线系统：MA5={ma5}, MA10={ma10}, MA20={ma20}
-    乖离率BIAS(5)：{bias}%
-    成交量变化：{volume_change}
-    趋势判断：{trend}
-    近期高低点：近20日最高{high_20}，近20日最低{low_20}
-
-    【舆情与新闻信息】
-    最新{max_age_days}天内相关新闻：
-    {news_content}
-
-    【输出要求】
-    严格按照以下格式输出，不得添加额外内容，不得修改标题：
-    🎯 {stock_name}({stock_code}) 决策仪表盘
-    📊 核心结论：【买入/观望/卖出】 | 综合评分：0-100分 | 多空方向：【看多/看空/震荡】
-    ---
-    📰 舆情与基本面速览
-    💭 舆情情绪：【积极/中性/消极】，一句话总结市场情绪
-    📈 业绩预期：一句话总结公司业绩情况与预期
-    ---
-    🚨 风险警报（分点列出，最多3条，每条不超过50字）
-    风险点1：xxx
-    风险点2：xxx
-    风险点3：xxx
-    ---
-    ✨ 利好催化（分点列出，最多3条，每条不超过50字）
-    利好1：xxx
-    利好2：xxx
-    利好3：xxx
-    ---
-    🎯 精确操作点位
-    建议买入价：xxx 元
-    止损价：xxx 元
-    第一目标价：xxx 元
-    第二目标价：xxx 元
-    ---
-    ✅ 操作检查清单
-    1. 趋势条件：【满足/注意/不满足】+ 说明
-    2. 量能条件：【满足/注意/不满足】+ 说明
-    3. 舆情条件：【满足/注意/不满足】+ 说明
-    4. 风险控制：【满足/注意/不满足】+ 说明
-    ---
-    📢 最新动态：一句话总结最新的核心消息，不超过100字
-    生成时间：{generate_time}
-
-# 推送配置（钉钉，与原项目自定义Webhook完全兼容）
-push:
-  # 推送开关：true=开启推送，false=仅生成本地报告不推送
-  enable_push: true
-  # 消息类型：钉钉支持 markdown/text，推荐markdown
-  msg_type: "markdown"
-  # 推送标题：钉钉消息卡片标题
-  title: "📈 股票智能分析报告"
-  # 是否同时推送纯文本摘要
-  send_summary: false
-
-# 交易纪律配置（与原项目完全对齐）
-trading_rules:
-  # 是否开启交易日检查：非交易日不执行分析
-  trading_day_check: true
-  # 多头排列判断规则
-  long_trend_rule: "MA5 > MA10 > MA20"
-  # 空头排列判断规则
-  short_trend_rule: "MA5 < MA10 < MA20"
-  # 止损比例默认值（%）
-  default_stop_loss: 5.0
-  # 止盈比例默认值（%）
-  default_take_profit: 10.0
+      - name: 执行股票分析
+        env:
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          OPENAI_BASE_URL: ${{ secrets.OPENAI_BASE_URL }}
+          OPENAI_MODEL: ${{ secrets.OPENAI_MODEL }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          TAVILY_API_KEYS: ${{ secrets.TAVILY_API_KEYS }}
+          SERPAPI_API_KEYS: ${{ secrets.SERPAPI_API_KEYS }}
+          CUSTOM_WEBHOOK_URLS: ${{ secrets.CUSTOM_WEBHOOK_URLS }}
+          DINGTALK_SECRET: ${{ secrets.DINGTALK_SECRET }}
+          STOCK_LIST: ${{ secrets.STOCK_LIST }}
+          NEWS_MAX_AGE_DAYS: ${{ secrets.NEWS_MAX_AGE_DAYS }}
+          BIAS_THRESHOLD: ${{ secrets.BIAS_THRESHOLD }}
+          ANALYSIS_DELAY: ${{ secrets.ANALYSIS_DELAY }}
+        run: |
+          RUN_CMD="python stock_analysis.py"
+          if [ -n "${{ github.event.inputs.stock_code }}" ]; then
+            RUN_CMD="$RUN_CMD --stock-code ${{ github.event.inputs.stock_code }}"
+          fi
+          if [ "${{ github.event.inputs.force_run }}" == "true" ]; then
+            RUN_CMD="$RUN_CMD --force-run"
+          fi
+          RUN_CMD="$RUN_CMD --market-type ${{ github.event.inputs.market_type }}"
+          echo "执行命令：$RUN_CMD"
+          $RUN_CMD
